@@ -8,9 +8,11 @@ DECLARE
 BEGIN
   SELECT stage_one + 1 INTO next_version FROM "schema_version";
   IF next_version = 2 THEN
-    -- Used as the sum of tx outputs for an epoch.
-    -- Need this to catch possible overflow.
-    EXECUTE 'CREATE DOMAIN outsum AS bigint CHECK (VALUE >= 0);';
+    -- Persistent does not support more precision than Int64, and outsum needs
+    -- to support Word128. We have defined outsum as a Word128 and the easiest
+    -- way to store than in the database as a readable value is using show/read
+    -- in the database as a bytea.
+    EXECUTE 'CREATE DOMAIN outsum AS bytea;';
 
     UPDATE "schema_version" SET stage_one = next_version;
     RAISE NOTICE 'DB has been migrated to stage_one version %', next_version;
