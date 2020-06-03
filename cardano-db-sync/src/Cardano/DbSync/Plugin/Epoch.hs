@@ -1,11 +1,18 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 module Cardano.DbSync.Plugin.Epoch
   ( epochPluginOnStartup
   , epochPluginInsertBlock
   , epochPluginRollbackBlock
+  -- * For tests
+  , updateEpochNumLogic
+  , UpdateEpochCmd (..)
   ) where
+
+import           Cardano.Prelude hiding (from, replace)
 
 import           Cardano.BM.Trace (Trace, logError, logInfo)
 
@@ -82,8 +89,9 @@ epochPluginInsertBlock trce blkTip = do
           -- the Ouroboros Classic era.
           pure $ Right ()
 
-        Byron.ABOBBlock blk ->
+        Byron.ABOBBlock blk -> do
           insertBlock trce (Byron.epochNumber blk slotsPerEpoch, Byron.blockNumber blk) (tipBlockNo tip)
+
     ShelleyBlockTip sblk tip ->
       insertBlock trce (Shelley.epochNumber sblk slotsPerEpoch, Shelley.blockNumber sblk) (tipBlockNo tip)
 
@@ -92,36 +100,80 @@ epochPluginInsertBlock trce blkTip = do
 epochPluginRollbackBlock :: Trace IO Text -> CardanoPoint -> IO (Either DbSyncNodeError ())
 epochPluginRollbackBlock _ _ = pure $ Right ()
 
--- -------------------------------------------------------------------------------------------------
-
+---------------------------------------------------------------------------------------------------
 insertBlock
     :: Trace IO Text
     -> (Word64, Word64)
     -> BlockNo
     -> ReaderT SqlBackend (LoggingT IO) (Either DbSyncNodeError ())
 insertBlock trce (epochNum, blockNo) tipNo = do
+
   mLatestCachedEpoch <- liftIO (readIORef latestCachedEpochVar)
   chainTipEpoch <- liftIO $ readIORef latestChainTipEpochVar
-  let lastCachedEpoch = fromMaybe 0 mLatestCachedEpoch
 
-  if  | epochNum == chainTipEpoch && lastCachedEpoch == chainTipEpoch ->
-          if unBlockNo tipNo - blockNo < 15
-            then -- Following the chain very closely.
-                 updateEpochNum epochNum trce
-            else pure $ Right ()
+  let blockDiff = unBlockNo tipNo - blockNo
 
-      | epochNum > 0 && mLatestCachedEpoch == Nothing ->
-          updateEpochNum 0 trce
-      | epochNum >= lastCachedEpoch + 2 ->
-          updateEpochNum (lastCachedEpoch + 1) trce
-      | epochNum == chainTipEpoch && lastCachedEpoch < chainTipEpoch ->
-          updateEpochNum (lastCachedEpoch + 1) trce
-      | epochNum > chainTipEpoch ->
-          -- Must just have started a new epoch, so call this which will
-          -- update chainTipEpoch.
-          updateEpochNum epochNum trce
-      | otherwise ->
-          pure $ Right ()
+  let updateEpochAction :: UpdateEpochCmd
+      updateEpochAction = updateEpochNumLogic epochNum mLatestCachedEpoch chainTipEpoch blockDiff
+
+  -- Convert commands into actions.
+  case updateEpochAction of
+    UpdateEpoch epochNum' -> do
+        -- For debugging! TO BE REMOVED!
+        liftIO . logInfo trce $ "UpdateEpoch!"
+        liftIO . logInfo trce $ "    epochNum = " <> (show epochNum :: Text)
+        liftIO . logInfo trce $ "    mLatestCachedEpoch = " <> (show mLatestCachedEpoch :: Text)
+        liftIO . logInfo trce $ "    chainTipEpoch = " <> (show chainTipEpoch :: Text)
+        liftIO . logInfo trce $ "    blockDiff = " <> (show blockDiff :: Text)
+        updateEpochNumDefault epochNum' trce
+    DoNotUpdate -> pure $ Right ()
+
+-- |Commands for separating the intructions from it's effect.
+data UpdateEpochCmd
+  = UpdateEpoch Word64
+  | DoNotUpdate
+  deriving (Eq, Show)
+
+-- |Update logic for the epochs.
+updateEpochNumLogic
+  :: Word64
+  -> Maybe Word64
+  -> Word64
+  -> Word64
+  -> UpdateEpochCmd
+updateEpochNumLogic epochNum mLatestCachedEpoch chainTipEpoch blockDiff = do
+
+      let lastCachedEpoch = fromMaybe 0 mLatestCachedEpoch
+
+      if  | epochNum == chainTipEpoch && lastCachedEpoch == chainTipEpoch ->
+              -- Following the chain very closely.
+              if blockDiff < 15
+                then UpdateEpoch epochNum
+                else DoNotUpdate
+
+          | epochNum > 0 && mLatestCachedEpoch == Nothing ->
+              -- There is no cache of the epoch.
+              UpdateEpoch 0
+
+          | epochNum >= lastCachedEpoch + 2 ->
+              -- The diff for the cached and current epoch is >= 2.
+              UpdateEpoch (lastCachedEpoch + 1)
+
+          | epochNum == chainTipEpoch && lastCachedEpoch < chainTipEpoch ->
+              UpdateEpoch (lastCachedEpoch + 1)
+
+          | epochNum > chainTipEpoch ->
+              -- Must just have started a new epoch, so call this which will
+              -- update chainTipEpoch.
+              -- This can hit the second condition and the third one.
+              -- It's very weird that this is here.
+              UpdateEpoch epochNum
+
+          | otherwise ->
+              -- I really don't see what could hit this one.
+              DoNotUpdate
+
+
 
 -- -------------------------------------------------------------------------------------------------
 
@@ -137,8 +189,8 @@ latestCachedEpochVar = unsafePerformIO $ newIORef Nothing -- Gets updated later.
 latestChainTipEpochVar :: IORef Word64
 latestChainTipEpochVar = unsafePerformIO $ newIORef 0 -- Gets updated later.
 
-updateEpochNum :: MonadIO m => Word64 -> Trace IO Text -> ReaderT SqlBackend m (Either DbSyncNodeError ())
-updateEpochNum epochNum trce = do
+updateEpochNumDefault :: MonadIO m => Word64 -> Trace IO Text -> ReaderT SqlBackend m (Either DbSyncNodeError ())
+updateEpochNumDefault epochNum trce = do
     transactionSaveWithIsolation Serializable
     mid <- queryEpochId epochNum
     res <- maybe insertEpoch updateEpoch mid
@@ -191,8 +243,10 @@ updateChainTipEpochVar _trce = do
     currentTime <- getCurrentTime
     case eMeta of
       Left _ -> do
+        -- This should be propagated upwards, not swallowed!
         atomicWriteIORef latestChainTipEpochVar 0
       Right meta -> do
+        -- Weird.
         let epoch = diffUTCTime currentTime (DB.metaStartTime meta)
                     / (0.01 * fromIntegral (DB.metaSlotDuration meta * DB.metaProtocolConst meta))
         atomicWriteIORef latestChainTipEpochVar $ floor epoch
