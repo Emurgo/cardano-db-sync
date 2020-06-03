@@ -6,7 +6,7 @@ DECLARE
 BEGIN
   SELECT stage_two + 1 INTO next_version FROM schema_version ;
   IF next_version = 1 THEN
-    EXECUTE 'CREATe TABLE "slot_leader"("id" SERIAL8  PRIMARY KEY UNIQUE,"hash" hash28type NOT NULL,"description" VARCHAR NOT NULL)' ;
+    EXECUTE 'CREATe TABLE "slot_leader"("id" SERIAL8  PRIMARY KEY UNIQUE,"hash" hash32type NOT NULL,"description" VARCHAR NOT NULL)' ;
     EXECUTE 'ALTER TABLE "slot_leader" ADD CONSTRAINT "unique_slot_leader" UNIQUE("hash")' ;
     EXECUTE 'CREATe TABLE "block"("id" SERIAL8  PRIMARY KEY UNIQUE,"hash" hash32type NOT NULL,"epoch_no" uinteger NULL,"slot_no" uinteger NULL,"block_no" uinteger NULL,"previous" INT8 NULL,"merkel_root" hash32type NULL,"slot_leader" INT8 NOT NULL,"size" uinteger NOT NULL,"time" timestamp NOT NULL,"tx_count" uinteger NOT NULL)' ;
     EXECUTE 'ALTER TABLE "block" ADD CONSTRAINT "unique_block" UNIQUE("hash")' ;
