@@ -59,7 +59,7 @@ import           System.IO.Unsafe (unsafePerformIO)
 
 
 
-epochPluginOnStartup :: Trace IO Text -> ReaderT SqlBackend (LoggingT IO) ()
+epochPluginOnStartup :: Trace IO Text -> ReaderT SqlBackend (LoggingT IO) (Either DbSyncNodeError ())
 epochPluginOnStartup trce = do
     liftIO . logInfo trce $ "epochPluginOnStartup: Checking"
     eMeta <- DB.queryMeta
@@ -89,7 +89,7 @@ epochPluginInsertBlock trce blkTip = do
           -- the Ouroboros Classic era.
           pure $ Right ()
 
-        Byron.ABOBBlock blk -> do
+        Byron.ABOBBlock blk ->
           insertBlock trce (Byron.epochNumber blk slotsPerEpoch, Byron.blockNumber blk) (tipBlockNo tip)
 
     ShelleyBlockTip sblk tip ->
@@ -163,8 +163,6 @@ updateEpochNumLogic epochNum mLatestCachedEpoch chainTipEpoch blockDiff = do
               UpdateEpoch (lastCachedEpoch + 1)
 
           | epochNum > chainTipEpoch ->
-              -- Must just have started a new epoch, so call this which will
-              -- update chainTipEpoch.
               -- This can hit the second condition and the third one.
               -- It's very weird that this is here.
               UpdateEpoch epochNum
@@ -196,8 +194,10 @@ updateEpochNumDefault epochNum trce = do
     res <- maybe insertEpoch updateEpoch mid
     transactionSaveWithIsolation Serializable
     liftIO $ atomicWriteIORef latestCachedEpochVar (Just epochNum)
-    updateChainTipEpochVar trce
-    pure res
+    chainTipRes <- updateChainTipEpochVar trce
+
+    -- We don't want to ignore either of the errors.
+    pure (res >>= \_ -> chainTipRes)
   where
     updateEpoch :: MonadIO m => EpochId -> ReaderT SqlBackend m (Either DbSyncNodeError ())
     updateEpoch epochId = do
@@ -236,17 +236,19 @@ queryLatestEpochNo = do
   pure $ unValue <$> listToMaybe res
 
 
-updateChainTipEpochVar :: MonadIO m => Trace IO Text -> ReaderT SqlBackend m ()
-updateChainTipEpochVar _trce = do
+updateChainTipEpochVar :: MonadIO m => Trace IO Text -> ReaderT SqlBackend m (Either DbSyncNodeError ())
+updateChainTipEpochVar trce = do
   eMeta <- DB.queryMeta
   liftIO $ do
     currentTime <- getCurrentTime
     case eMeta of
-      Left _ -> do
-        -- This should be propagated upwards, not swallowed!
+      Left err -> do
+        let lookupErr = NELookup "updateChainTipEpochVar, missing metadata!" err
+        liftIO . logError trce $ renderDbSyncNodeError lookupErr
         atomicWriteIORef latestChainTipEpochVar 0
+        pure . Left $ lookupErr
       Right meta -> do
-        -- Weird.
         let epoch = diffUTCTime currentTime (DB.metaStartTime meta)
                     / (0.01 * fromIntegral (DB.metaSlotDuration meta * DB.metaProtocolConst meta))
         atomicWriteIORef latestChainTipEpochVar $ floor epoch
+        pure . Right $ ()
