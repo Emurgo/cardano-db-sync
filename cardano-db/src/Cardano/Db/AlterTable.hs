@@ -3,6 +3,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -Wno-unused-local-binds #-}
 
 module Cardano.Db.AlterTable (
   AlterTable(..),
@@ -15,8 +16,8 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Control.Monad.Trans.Reader (ReaderT)
 import qualified Data.Text as T
-import Database.Persist.Postgresql (ConstraintNameDB (..), EntityNameDB (..), FieldNameDB (..), SqlBackend, rawExecute, EntityDef)
-import Database.PostgreSQL.Simple (SqlError)
+import Database.Persist.Postgresql (ConstraintNameDB (..), EntityNameDB (..), FieldNameDB (..), SqlBackend, rawExecute, EntityDef, getEntityFields, fieldDB)
+import Database.PostgreSQL.Simple (SqlError (..), ExecStatus (..))
 import Database.Persist.EntityDef.Internal (entityDB)
 
 -- The ability to `ALTER TABLE` currently dealing with `CONSTRAINT` but can be extended
@@ -39,8 +40,13 @@ alterTable ::
   EntityDef ->
   AlterTable ->
   ReaderT SqlBackend m ()
-alterTable entity (AddUniqueConstraint cname cols) =
-  handle alterTableExceptHandler (rawExecute query [])
+alterTable entity (AddUniqueConstraint cname cols) = do
+  -- TODO: might not be worth doing the check as the query would return an
+  -- error anyways if the fields aresn't present
+  -- would be nice to handle it back in applyAndInsertBlockMaybe
+  if checkAllFieldsValid entity cols
+    then handle alterTableExceptHandler (rawExecute query [])
+    else liftIO $ throwIO (DbAlterTableException "invalid field" sqlError)
   where
     query :: T.Text
     query =
@@ -67,9 +73,25 @@ alterTable entity (DropUniqueConstraint cname) =
         , unConstraintNameDB cname
         ]
 
+-- check to see that the field inputs exist
+checkAllFieldsValid :: Foldable t => EntityDef -> t FieldNameDB -> Bool
+checkAllFieldsValid entity cols = do
+  let fieldDef = getEntityFields entity
+      fieldDbs = map fieldDB fieldDef
+  all (`elem` fieldDbs) cols
+
 alterTableExceptHandler ::
   forall m a.
   MonadIO m =>
   SqlError ->
   ReaderT SqlBackend m a
 alterTableExceptHandler e = liftIO $ throwIO (DbAlterTableException "" e)
+
+sqlError :: SqlError
+sqlError = SqlError
+  { sqlState = ""
+  , sqlExecStatus = FatalError
+  , sqlErrorMsg = ""
+  , sqlErrorDetail = ""
+  , sqlErrorHint = ""
+  }

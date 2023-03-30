@@ -46,7 +46,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Strict.Maybe as Strict
 
-import Database.Persist.Postgresql (ConstraintNameDB (..), FieldNameDB (..), PersistEntity (entityDef), getEntityForeignDefs, ForeignDef (..))
+import Database.Persist.Postgresql (ConstraintNameDB (..), FieldNameDB (..), PersistEntity (entityDef), getEntityForeignDefs, ForeignDef (..), getEntityFields, FieldDef (fieldDB))
 import Database.Persist.SqlBackend.Internal
 import Database.Persist.SqlBackend.Internal.StatementCache
 import Ouroboros.Consensus.Cardano.Block (HardForkBlock (..))
@@ -89,13 +89,12 @@ applyAndInsertBlockMaybe syncEnv cblk = do
         liftIO $ setConsistentLevel syncEnv Consistent
         -- now that we have caught up with the tip of the chain
         -- we can put the constraints on rewards table
-        let entity = entityDef $ Proxy @DB.Reward
-            [ForeignDef{..}] = getEntityForeignDefs entity
+        let entityD = entityDef $ Proxy @DB.Reward
+            [ForeignDef{..}] = getEntityForeignDefs entityD
         lift $
           DB.alterTable
-            entity
+            entityD
             ( DB.AddUniqueConstraint
-                -- TODO: Vince it would be nice not to hardcode these
                 foreignConstraintNameDBName
                 [ FieldNameDB "addr_id"
                 , FieldNameDB "type"
