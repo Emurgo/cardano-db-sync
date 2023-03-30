@@ -1,8 +1,12 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ExplicitNamespaces #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# OPTIONS_GHC -Wno-unused-matches #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Cardano.DbSync.Default (
   insertListBlocks,
@@ -42,8 +46,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Strict.Maybe as Strict
 
--- import qualified Data.Text as Text
-
+import Database.Persist.Postgresql (ConstraintNameDB (..), FieldNameDB (..), PersistEntity (entityDef), getEntityForeignDefs, ForeignDef (..))
 import Database.Persist.SqlBackend.Internal
 import Database.Persist.SqlBackend.Internal.StatementCache
 import Ouroboros.Consensus.Cardano.Block (HardForkBlock (..))
@@ -58,8 +61,7 @@ insertListBlocks synEnv blocks = do
   backend <- getBackend synEnv
   DB.runDbIohkLogging backend tracer
     . runExceptT
-    $ do
-      traverse_ (applyAndInsertBlockMaybe synEnv) blocks
+    $ traverse_ (applyAndInsertBlockMaybe synEnv) blocks
   where
     tracer = getTrace synEnv
 
@@ -67,8 +69,8 @@ applyAndInsertBlockMaybe ::
   SyncEnv -> CardanoBlock -> ExceptT SyncNodeError (ReaderT SqlBackend (LoggingT IO)) ()
 applyAndInsertBlockMaybe syncEnv cblk = do
   (!applyRes, !tookSnapshot) <- liftIO mkApplyResult
-  bl <- liftIO $ isConsistent syncEnv
-  if bl
+  consistentRes <- liftIO $ isConsistent syncEnv
+  if consistentRes
     then -- In the usual case it will be consistent so we don't need to do any queries. Just insert the block
       insertBlock syncEnv cblk applyRes False tookSnapshot
     else do
@@ -85,11 +87,27 @@ applyAndInsertBlockMaybe syncEnv cblk = do
         rollbackFromBlockNo syncEnv (blockNo cblk)
         insertBlock syncEnv cblk applyRes True tookSnapshot
         liftIO $ setConsistentLevel syncEnv Consistent
+        -- now that we have caught up with the tip of the chain
+        -- we can put the constraints on rewards table
+        let entity = entityDef $ Proxy @DB.Reward
+            [ForeignDef{..}] = getEntityForeignDefs entity
+        lift $
+          DB.alterTable
+            entity
+            ( DB.AddUniqueConstraint
+                -- TODO: Vince it would be nice not to hardcode these
+                foreignConstraintNameDBName
+                [ FieldNameDB "addr_id"
+                , FieldNameDB "type"
+                , FieldNameDB "earned_epoch"
+                , FieldNameDB "pool_id"
+                ]
+            )
   where
     tracer = getTrace syncEnv
 
     mkApplyResult :: IO (ApplyResult, Bool)
-    mkApplyResult = do
+    mkApplyResult =
       case envLedgerEnv syncEnv of
         HasLedger hle -> applyBlockAndSnapshot hle cblk
         NoLedger nle -> do
@@ -149,7 +167,6 @@ insertBlock syncEnv cblk applyRes firstAfterRollback tookSnapshot = do
           Generic.fromBabbageBlock (getPrices applyResult) blk
   insertEpoch details
   lift $ commitOrIndexes withinTwoMin withinHalfHour
-
   where
     tracer = getTrace syncEnv
 
@@ -216,7 +233,7 @@ insertLedgerEvents syncEnv currentEpochNo@(EpochNo curEpoch) =
     handler ev =
       case ev of
         LedgerNewEpoch en ss -> do
-          lift $ do
+          lift $
             insertEpochSyncTime en (toSyncState ss) (envEpochSyncTime syncEnv)
           sqlBackend <- lift ask
           persistantCacheSize <- liftIO $ statementCacheSize $ connStmtMap sqlBackend
@@ -236,16 +253,16 @@ insertLedgerEvents syncEnv currentEpochNo@(EpochNo curEpoch) =
         LedgerIncrementalRewards _ rwd -> do
           let rewards = Map.toList $ Generic.unRewards rwd
           insertRewards ntw (subFromCurrentEpoch 1) (EpochNo $ curEpoch + 1) cache rewards
-        LedgerRestrainedRewards e rwd creds -> do
+        LedgerRestrainedRewards e rwd creds ->
           lift $ adjustEpochRewards tracer ntw cache e rwd creds
-        LedgerTotalRewards _e rwd -> do
+        LedgerTotalRewards _e rwd ->
           lift $ validateEpochRewards tracer ntw (subFromCurrentEpoch 2) currentEpochNo rwd
-        LedgerMirDist rwd -> do
+        LedgerMirDist rwd ->
           unless (Map.null rwd) $ do
             let rewards = Map.toList rwd
             insertRewards ntw (subFromCurrentEpoch 1) currentEpochNo cache rewards
             liftIO . logInfo tracer $ "Inserted " <> show (length rewards) <> " Mir rewards"
-        LedgerPoolReap en drs -> do
+        LedgerPoolReap en drs ->
           unless (Map.null $ Generic.unRewards drs) $ do
             insertPoolDepositRefunds syncEnv en drs
 
