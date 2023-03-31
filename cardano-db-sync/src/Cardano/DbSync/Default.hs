@@ -7,6 +7,7 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# OPTIONS_GHC -Wno-unused-matches #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Cardano.DbSync.Default (
   insertListBlocks,
@@ -46,7 +47,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Strict.Maybe as Strict
 
-import Database.Persist.Postgresql (ConstraintNameDB (..), FieldNameDB (..), PersistEntity (entityDef), getEntityForeignDefs, ForeignDef (..), getEntityFields, FieldDef (fieldDB))
+import Database.Persist.Postgresql (ConstraintNameDB (..), FieldNameDB (..), PersistEntity (entityDef))
 import Database.Persist.SqlBackend.Internal
 import Database.Persist.SqlBackend.Internal.StatementCache
 import Ouroboros.Consensus.Cardano.Block (HardForkBlock (..))
@@ -88,20 +89,11 @@ applyAndInsertBlockMaybe syncEnv cblk = do
         insertBlock syncEnv cblk applyRes True tookSnapshot
         liftIO $ setConsistentLevel syncEnv Consistent
         -- now that we have caught up with the tip of the chain
-        -- we can put the constraints on rewards table
-        let entityD = entityDef $ Proxy @DB.Reward
-            [ForeignDef{..}] = getEntityForeignDefs entityD
-        lift $
-          DB.alterTable
-            entityD
-            ( DB.AddUniqueConstraint
-                foreignConstraintNameDBName
-                [ FieldNameDB "addr_id"
-                , FieldNameDB "type"
-                , FieldNameDB "earned_epoch"
-                , FieldNameDB "pool_id"
-                ]
-            )
+        -- we can put the constraints on Reward + EpochStake tables
+        -- as a speed improvement.
+        lift addRewardTableConstraint
+        lift addEpochStakeTableConstraint
+
   where
     tracer = getTrace syncEnv
 
@@ -112,6 +104,38 @@ applyAndInsertBlockMaybe syncEnv cblk = do
         NoLedger nle -> do
           slotDetails <- getSlotDetailsNode nle (cardanoBlockSlotNo cblk)
           pure (defaultApplyResult slotDetails, False)
+
+addRewardTableConstraint ::
+  forall m. ( MonadBaseControl IO m , MonadIO m) => ReaderT SqlBackend m ()
+addRewardTableConstraint = do
+  let entityD = entityDef $ Proxy @DB.Reward
+      -- keeping this here as an example of how one would get an existing constraint
+      -- fConstraint = case getEntityForeignDefs entityD of
+      --   [] -> ConstraintNameDB "unique_reward"
+      --   [ForeignDef{..}] -> foreignConstraintNameDBName
+  DB.alterTable
+    entityD
+    ( DB.AddUniqueConstraint
+        (ConstraintNameDB "unique_reward")
+        [ FieldNameDB "addr_id"
+        , FieldNameDB "type"
+        , FieldNameDB "earned_epoch"
+        , FieldNameDB "pool_id"
+        ]
+    )
+
+addEpochStakeTableConstraint ::
+  forall m. ( MonadBaseControl IO m , MonadIO m) => ReaderT SqlBackend m ()
+addEpochStakeTableConstraint = do
+  let entityD = entityDef $ Proxy @DB.EpochStake
+  DB.alterTable
+    entityD
+    ( DB.AddUniqueConstraint
+        (ConstraintNameDB "epoch_no")
+        [ FieldNameDB "addr_id"
+        , FieldNameDB "pool_id"
+        ]
+    )
 
 insertBlock ::
   SyncEnv ->
