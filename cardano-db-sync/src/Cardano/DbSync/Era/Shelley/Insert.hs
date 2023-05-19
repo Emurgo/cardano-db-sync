@@ -15,6 +15,7 @@ module Cardano.DbSync.Era.Shelley.Insert (
   insertStakeRegistration,
   insertDelegation,
   insertStakeAddressRefIfMissing,
+  mkAdaPots,
 ) where
 
 import Cardano.Api (SerialiseAsCBOR (..))
@@ -43,14 +44,14 @@ import Cardano.DbSync.Util
 import qualified Cardano.Ledger.Address as Ledger
 import Cardano.Ledger.Alonzo.Language (Language)
 import qualified Cardano.Ledger.Alonzo.Scripts as Ledger
-import Cardano.Ledger.BaseTypes (strictMaybeToMaybe)
+import Cardano.Ledger.BaseTypes (getVersion, strictMaybeToMaybe)
 import qualified Cardano.Ledger.BaseTypes as Ledger
 import Cardano.Ledger.Coin (Coin (..))
 import qualified Cardano.Ledger.Coin as Ledger
 import qualified Cardano.Ledger.Credential as Ledger
 import Cardano.Ledger.Keys
 import qualified Cardano.Ledger.Keys as Ledger
-import Cardano.Ledger.Mary.Value (AssetName (..), MaryValue (..), PolicyID (..))
+import Cardano.Ledger.Mary.Value (AssetName (..), MultiAsset (..), PolicyID (..))
 import qualified Cardano.Ledger.Shelley.API.Wallet as Shelley
 import qualified Cardano.Ledger.Shelley.TxBody as Shelley
 import Cardano.Prelude
@@ -104,7 +105,7 @@ insertShelleyBlock syncEnv shouldLog withinTwoMins withinHalfHour blk details is
           , DB.blockSize = Generic.blkSize blk
           , DB.blockTime = sdSlotTime details
           , DB.blockTxCount = fromIntegral $ length (Generic.blkTxs blk)
-          , DB.blockProtoMajor = fromIntegral $ Ledger.pvMajor (Generic.blkProto blk)
+          , DB.blockProtoMajor = getVersion $ Ledger.pvMajor (Generic.blkProto blk)
           , DB.blockProtoMinor = fromIntegral $ Ledger.pvMinor (Generic.blkProto blk)
           , -- Shelley specific
             DB.blockVrfKey = Just $ Generic.blkVrfKey blk
@@ -491,35 +492,35 @@ insertPoolRegister ::
   Shelley.PoolParams StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
 insertPoolRegister _tracer cache isMember network (EpochNo epoch) blkId txId idx params = do
-  poolHashId <- lift $ insertPoolKeyWithCache cache CacheNew (Shelley._poolId params)
-  mdId <- case strictMaybeToMaybe $ Shelley._poolMD params of
+  poolHashId <- lift $ insertPoolKeyWithCache cache CacheNew (Shelley.ppId params)
+  mdId <- case strictMaybeToMaybe $ Shelley.ppMetadata params of
     Just md -> Just <$> insertMetaDataRef poolHashId txId md
     Nothing -> pure Nothing
 
   epochActivationDelay <- mkEpochActivationDelay poolHashId
 
-  saId <- lift $ insertStakeAddressWithCache cache CacheNew txId (adjustNetworkTag $ Shelley._poolRAcnt params)
+  saId <- lift $ insertStakeAddressWithCache cache CacheNew txId (adjustNetworkTag $ Shelley.ppRewardAcnt params)
   poolUpdateId <-
     lift . DB.insertPoolUpdate $
       DB.PoolUpdate
         { DB.poolUpdateHashId = poolHashId
         , DB.poolUpdateCertIndex = idx
-        , DB.poolUpdateVrfKeyHash = hashToBytes (Shelley._poolVrf params)
-        , DB.poolUpdatePledge = Generic.coinToDbLovelace (Shelley._poolPledge params)
+        , DB.poolUpdateVrfKeyHash = hashToBytes (Shelley.ppVrf params)
+        , DB.poolUpdatePledge = Generic.coinToDbLovelace (Shelley.ppPledge params)
         , DB.poolUpdateRewardAddrId = saId
         , DB.poolUpdateActiveEpochNo = epoch + epochActivationDelay
         , DB.poolUpdateMetaId = mdId
-        , DB.poolUpdateMargin = realToFrac $ Ledger.unboundRational (Shelley._poolMargin params)
-        , DB.poolUpdateFixedCost = Generic.coinToDbLovelace (Shelley._poolCost params)
+        , DB.poolUpdateMargin = realToFrac $ Ledger.unboundRational (Shelley.ppMargin params)
+        , DB.poolUpdateFixedCost = Generic.coinToDbLovelace (Shelley.ppCost params)
         , DB.poolUpdateRegisteredTxId = txId
         }
 
-  mapM_ (insertPoolOwner cache network poolUpdateId txId) $ toList (Shelley._poolOwners params)
-  mapM_ (insertPoolRelay poolUpdateId) $ toList (Shelley._poolRelays params)
+  mapM_ (insertPoolOwner cache network poolUpdateId txId) $ toList (Shelley.ppOwners params)
+  mapM_ (insertPoolRelay poolUpdateId) $ toList (Shelley.ppRelays params)
   where
     mkEpochActivationDelay :: MonadIO m => DB.PoolHashId -> ExceptT SyncNodeError (ReaderT SqlBackend m) Word64
     mkEpochActivationDelay poolHashId =
-      if isMember (Shelley._poolId params)
+      if isMember (Shelley.ppId params)
         then pure 3
         else do
           -- if the pool is not registered at the end of the previous block, check for
@@ -561,8 +562,8 @@ insertMetaDataRef poolId txId md =
   lift . DB.insertPoolMetadataRef $
     DB.PoolMetadataRef
       { DB.poolMetadataRefPoolId = poolId
-      , DB.poolMetadataRefUrl = PoolUrl $ Ledger.urlToText (Shelley._poolMDUrl md)
-      , DB.poolMetadataRefHash = Shelley._poolMDHash md
+      , DB.poolMetadataRefUrl = PoolUrl $ Ledger.urlToText (Shelley.pmUrl md)
+      , DB.poolMetadataRefHash = Shelley.pmHash md
       , DB.poolMetadataRefRegisteredTxId = txId
       }
 
@@ -846,7 +847,7 @@ insertParamProposal _tracer blkId txId pp = do
       , DB.paramProposalTreasuryGrowthRate = Generic.unitIntervalToDouble <$> pppTreasuryGrowthRate pp
       , DB.paramProposalDecentralisation = Generic.unitIntervalToDouble <$> pppDecentralisation pp
       , DB.paramProposalEntropy = Generic.nonceToBytes =<< pppEntropy pp
-      , DB.paramProposalProtocolMajor = fromIntegral . Ledger.pvMajor <$> pppProtocolVersion pp
+      , DB.paramProposalProtocolMajor = getVersion . Ledger.pvMajor <$> pppProtocolVersion pp
       , DB.paramProposalProtocolMinor = fromIntegral . Ledger.pvMinor <$> pppProtocolVersion pp
       , DB.paramProposalMinUtxoValue = Generic.coinToDbLovelace <$> pppMinUtxoValue pp
       , DB.paramProposalMinPoolCost = Generic.coinToDbLovelace <$> pppMinPoolCost pp
@@ -983,7 +984,7 @@ insertCostModel ::
 insertCostModel _blkId cms =
   lift . DB.insertCostModel $
     DB.CostModel
-      { DB.costModelHash = Crypto.abstractHashToBytes $ Crypto.serializeCborHash cms
+      { DB.costModelHash = Crypto.abstractHashToBytes $ Crypto.serializeCborHash $ Ledger.CostModels cms mempty mempty
       , DB.costModelCosts = Text.decodeUtf8 $ LBS.toStrict $ Aeson.encode cms
       }
 
@@ -1014,7 +1015,7 @@ insertEpochParam _tracer blkId (EpochNo epoch) params nonce = do
       , DB.epochParamTreasuryGrowthRate = Generic.unitIntervalToDouble (Generic.ppTreasuryGrowthRate params)
       , DB.epochParamDecentralisation = Generic.unitIntervalToDouble (Generic.ppDecentralisation params)
       , DB.epochParamExtraEntropy = Generic.nonceToBytes $ Generic.ppExtraEntropy params
-      , DB.epochParamProtocolMajor = fromIntegral $ Ledger.pvMajor (Generic.ppProtocolVersion params)
+      , DB.epochParamProtocolMajor = getVersion $ Ledger.pvMajor (Generic.ppProtocolVersion params)
       , DB.epochParamProtocolMinor = fromIntegral $ Ledger.pvMinor (Generic.ppProtocolVersion params)
       , DB.epochParamMinUtxoValue = Generic.coinToDbLovelace (Generic.ppMinUTxOValue params)
       , DB.epochParamMinPoolCost = Generic.coinToDbLovelace (Generic.ppMinPoolCost params)
@@ -1038,9 +1039,9 @@ prepareMaTxMint ::
   Trace IO Text ->
   Cache ->
   DB.TxId ->
-  MaryValue StandardCrypto ->
+  MultiAsset StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) [DB.MaTxMint]
-prepareMaTxMint _tracer cache txId (MaryValue _adaShouldAlwaysBeZeroButWeDoNotCheck mintMap) =
+prepareMaTxMint _tracer cache txId (MultiAsset mintMap) =
   concatMapM (lift . prepareOuter) $ Map.toList mintMap
   where
     prepareOuter ::
@@ -1160,14 +1161,23 @@ insertPots ::
 insertPots blockId slotNo epochNo pots =
   void . lift $
     DB.insertAdaPots $
-      DB.AdaPots
-        { DB.adaPotsSlotNo = unSlotNo slotNo
-        , DB.adaPotsEpochNo = unEpochNo epochNo
-        , DB.adaPotsTreasury = Generic.coinToDbLovelace $ Shelley.treasuryAdaPot pots
-        , DB.adaPotsReserves = Generic.coinToDbLovelace $ Shelley.reservesAdaPot pots
-        , DB.adaPotsRewards = Generic.coinToDbLovelace $ Shelley.rewardsAdaPot pots
-        , DB.adaPotsUtxo = Generic.coinToDbLovelace $ Shelley.utxoAdaPot pots
-        , DB.adaPotsDeposits = Generic.coinToDbLovelace $ Shelley.depositsAdaPot pots
-        , DB.adaPotsFees = Generic.coinToDbLovelace $ Shelley.feesAdaPot pots
-        , DB.adaPotsBlockId = blockId
-        }
+      mkAdaPots blockId slotNo epochNo pots
+
+mkAdaPots ::
+  DB.BlockId ->
+  SlotNo ->
+  EpochNo ->
+  Shelley.AdaPots ->
+  DB.AdaPots
+mkAdaPots blockId slotNo epochNo pots =
+  DB.AdaPots
+    { DB.adaPotsSlotNo = unSlotNo slotNo
+    , DB.adaPotsEpochNo = unEpochNo epochNo
+    , DB.adaPotsTreasury = Generic.coinToDbLovelace $ Shelley.treasuryAdaPot pots
+    , DB.adaPotsReserves = Generic.coinToDbLovelace $ Shelley.reservesAdaPot pots
+    , DB.adaPotsRewards = Generic.coinToDbLovelace $ Shelley.rewardsAdaPot pots
+    , DB.adaPotsUtxo = Generic.coinToDbLovelace $ Shelley.utxoAdaPot pots
+    , DB.adaPotsDeposits = Generic.coinToDbLovelace $ Shelley.depositsAdaPot pots
+    , DB.adaPotsFees = Generic.coinToDbLovelace $ Shelley.feesAdaPot pots
+    , DB.adaPotsBlockId = blockId
+    }
