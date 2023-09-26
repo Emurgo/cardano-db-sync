@@ -36,6 +36,8 @@ data NodeConfig = NodeConfig
   , ncShelleyGenesisHash :: !GenesisHashShelley
   , ncAlonzoGenesisFile :: !GenesisFile
   , ncAlonzoGenesisHash :: !GenesisHashAlonzo
+  , ncConwayGenesisFile :: !(Maybe GenesisFile)
+  , ncConwayGenesisHash :: !(Maybe GenesisHashConway)
   , ncRequiresNetworkMagic :: !RequiresNetworkMagic
   , ncByronProtocolVersion :: !Byron.ProtocolVersion
   , -- Shelley hardfok parameters
@@ -80,12 +82,14 @@ instance FromJSON NodeConfig where
         NodeConfig
           <$> (o .: "Protocol")
           <*> (o .:? "PBftSignatureThreshold")
-          <*> fmap GenesisFile (o .: "ByronGenesisFile")
-          <*> fmap GenesisHashByron (o .: "ByronGenesisHash")
-          <*> fmap GenesisFile (o .: "ShelleyGenesisFile")
-          <*> fmap GenesisHashShelley (o .: "ShelleyGenesisHash")
-          <*> fmap GenesisFile (o .: "AlonzoGenesisFile")
-          <*> fmap GenesisHashAlonzo (o .: "AlonzoGenesisHash")
+          <*> (o .: "ByronGenesisFile")
+          <*> (o .: "ByronGenesisHash")
+          <*> (o .: "ShelleyGenesisFile")
+          <*> (o .: "ShelleyGenesisHash")
+          <*> (o .: "AlonzoGenesisFile")
+          <*> (o .: "AlonzoGenesisHash")
+          <*> (o .:? "ConwayGenesisFile")
+          <*> (o .:? "ConwayGenesisHash")
           <*> (o .: "RequiresNetworkMagic")
           <*> parseByronProtocolVersion o
           <*> parseShelleyHardForkEpoch o
