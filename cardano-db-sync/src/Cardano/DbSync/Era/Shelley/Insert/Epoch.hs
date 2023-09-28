@@ -4,6 +4,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoImplicitPrelude #-}
@@ -25,10 +26,12 @@ import qualified Cardano.DbSync.Era.Shelley.Generic as Generic
 import Cardano.DbSync.Era.Util (liftLookupFail)
 import Cardano.DbSync.Error
 import Cardano.DbSync.Types
+import Cardano.DbSync.Util.Constraint (constraintNameEpochStake, constraintNameReward)
 import Cardano.Ledger.BaseTypes (Network)
 import qualified Cardano.Ledger.Coin as Shelley
 import Cardano.Prelude
 import Cardano.Slotting.Slot (EpochNo (..))
+import Control.Concurrent.Class.MonadSTM.Strict (readTVarIO)
 import Control.Monad.Extra (mapMaybeM)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import qualified Data.Map.Strict as Map
@@ -45,12 +48,13 @@ insertStakeSlice ::
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
 insertStakeSlice _ Generic.NoSlices = pure ()
 insertStakeSlice syncEnv (Generic.Slice slice finalSlice) = do
-  insertEpochStake (envCache syncEnv) network (Generic.sliceEpochNo slice) (Map.toList $ Generic.sliceDistr slice)
+  insertEpochStake syncEnv network (Generic.sliceEpochNo slice) (Map.toList $ Generic.sliceDistr slice)
   when finalSlice $ do
     lift $ DB.updateSetComplete $ unEpochNo $ Generic.sliceEpochNo slice
     size <- lift $ DB.queryEpochStakeCount (unEpochNo $ Generic.sliceEpochNo slice)
-    liftIO . logInfo tracer $
-      mconcat ["Inserted ", show size, " EpochStake for ", show (Generic.sliceEpochNo slice)]
+    liftIO
+      . logInfo tracer
+      $ mconcat ["Inserted ", show size, " EpochStake for ", show (Generic.sliceEpochNo slice)]
   where
     tracer :: Trace IO Text
     tracer = getTrace syncEnv
@@ -60,20 +64,25 @@ insertStakeSlice syncEnv (Generic.Slice slice finalSlice) = do
 
 insertEpochStake ::
   (MonadBaseControl IO m, MonadIO m) =>
-  Cache ->
+  SyncEnv ->
   Network ->
   EpochNo ->
   [(StakeCred, (Shelley.Coin, PoolKeyHash))] ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertEpochStake cache nw epochNo stakeChunk = do
-  dbStakes <- mapM mkStake stakeChunk
-  lift $ DB.insertManyEpochStakes dbStakes
+insertEpochStake syncEnv nw epochNo stakeChunk = do
+  let cache = envCache syncEnv
+  DB.ManualDbConstraints {..} <- liftIO $ readTVarIO $ envDbConstraints syncEnv
+  dbStakes <- mapM (mkStake cache) stakeChunk
+  let chunckDbStakes = splittRecordsEvery 100000 dbStakes
+  -- minimising the bulk inserts into hundred thousand chunks to improve performance
+  forM_ chunckDbStakes $ \dbs -> lift $ DB.insertManyEpochStakes dbConstraintEpochStake constraintNameEpochStake dbs
   where
     mkStake ::
       (MonadBaseControl IO m, MonadIO m) =>
+      Cache ->
       (StakeCred, (Shelley.Coin, PoolKeyHash)) ->
       ExceptT SyncNodeError (ReaderT SqlBackend m) DB.EpochStake
-    mkStake (saddr, (coin, pool)) = do
+    mkStake cache (saddr, (coin, pool)) = do
       saId <- liftLookupFail "insertEpochStake.queryStakeAddrWithCache" $ queryStakeAddrWithCache cache CacheNew nw saddr
       poolId <- liftLookupFail "insertEpochStake.queryPoolKeyWithCache" $ queryPoolKeyWithCache cache CacheNew pool
       pure $
@@ -86,15 +95,19 @@ insertEpochStake cache nw epochNo stakeChunk = do
 
 insertRewards ::
   (MonadBaseControl IO m, MonadIO m) =>
+  SyncEnv ->
   Network ->
   EpochNo ->
   EpochNo ->
   Cache ->
   [(StakeCred, Set Generic.Reward)] ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertRewards nw earnedEpoch spendableEpoch cache rewardsChunk = do
+insertRewards syncEnv nw earnedEpoch spendableEpoch cache rewardsChunk = do
+  DB.ManualDbConstraints {..} <- liftIO $ readTVarIO $ envDbConstraints syncEnv
   dbRewards <- concatMapM mkRewards rewardsChunk
-  lift $ DB.insertManyRewards dbRewards
+  let chunckDbRewards = splittRecordsEvery 100000 dbRewards
+  -- minimising the bulk inserts into hundred thousand chunks to improve performance
+  forM_ chunckDbRewards $ \rws -> lift $ DB.insertManyRewards dbConstraintRewards constraintNameReward rws
   where
     mkRewards ::
       (MonadBaseControl IO m, MonadIO m) =>
@@ -137,6 +150,14 @@ insertRewards nw earnedEpoch spendableEpoch cache rewardsChunk = do
     queryPool (Strict.Just poolHash) =
       Just <$> liftLookupFail "insertRewards.queryPoolKeyWithCache" (queryPoolKeyWithCache cache CacheNew poolHash)
 
+splittRecordsEvery :: Int -> [a] -> [[a]]
+splittRecordsEvery val = go
+  where
+    go [] = []
+    go ys =
+      let (as, bs) = splitAt val ys
+       in as : go bs
+
 insertPoolDepositRefunds ::
   (MonadBaseControl IO m, MonadIO m) =>
   SyncEnv ->
@@ -144,7 +165,7 @@ insertPoolDepositRefunds ::
   Generic.Rewards ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
 insertPoolDepositRefunds syncEnv epochNo refunds = do
-  insertRewards nw epochNo epochNo (envCache syncEnv) (Map.toList rwds)
+  insertRewards syncEnv nw epochNo epochNo (envCache syncEnv) (Map.toList rwds)
   liftIO . logInfo tracer $ "Inserted " <> show (Generic.rewardsCount refunds) <> " deposit refund rewards"
   where
     tracer = getTrace syncEnv

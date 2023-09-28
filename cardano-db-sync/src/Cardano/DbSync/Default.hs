@@ -1,8 +1,11 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ExplicitNamespaces #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# OPTIONS_GHC -Wno-unused-matches #-}
 
 module Cardano.DbSync.Default (
   insertListBlocks,
@@ -30,6 +33,7 @@ import Cardano.DbSync.LocalStateQuery
 import Cardano.DbSync.Rollback
 import Cardano.DbSync.Types
 import Cardano.DbSync.Util
+import Cardano.DbSync.Util.Constraint (addConstraintsIfNotExist)
 import qualified Cardano.Ledger.Alonzo.Scripts as Ledger
 import Cardano.Ledger.Shelley.AdaPots as Shelley
 import Cardano.Prelude
@@ -54,8 +58,7 @@ insertListBlocks ::
 insertListBlocks synEnv blocks = do
   DB.runDbIohkLogging (envBackend synEnv) tracer
     . runExceptT
-    $ do
-      traverse_ (applyAndInsertBlockMaybe synEnv) blocks
+    $ traverse_ (applyAndInsertBlockMaybe synEnv) blocks
   where
     tracer = getTrace synEnv
 
@@ -75,8 +78,9 @@ applyAndInsertBlockMaybe syncEnv cblk = do
       -- equal, insert the block and restore consistency between ledger and db.
       case eiBlockInDbAlreadyId of
         Left _ -> do
-          liftIO . logInfo tracer $
-            mconcat
+          liftIO
+            . logInfo tracer
+            $ mconcat
               [ "Received block which is not in the db with "
               , textShow (getHeaderFields cblk)
               , ". Time to restore consistency."
@@ -178,8 +182,9 @@ insertBlock syncEnv cblk applyRes firstAfterRollback tookSnapshot = do
   -- update the epoch
   updateEpoch details isNewEpochEvent
   whenPruneTxOut syncEnv $
-    when (unBlockNo blkNo `mod` getPruneInterval syncEnv == 0) $ do
-      lift $ DB.deleteConsumedTxOut tracer (getSafeBlockNoDiff syncEnv)
+    when (unBlockNo blkNo `mod` getPruneInterval syncEnv == 0) $
+      do
+        lift $ DB.deleteConsumedTxOut tracer (getSafeBlockNoDiff syncEnv)
   lift $ commitOrIndexes withinTwoMin withinHalfHour
   where
     tracer = getTrace syncEnv
@@ -212,6 +217,7 @@ insertBlock syncEnv cblk applyRes firstAfterRollback tookSnapshot = do
           else pure False
       when withinHalfHour $ do
         ranIndexes <- liftIO $ getRanIndexes syncEnv
+        addConstraintsIfNotExist syncEnv tracer
         unless ranIndexes $ do
           unless commited DB.transactionCommit
           liftIO $ runIndexMigrations syncEnv
@@ -256,7 +262,7 @@ insertLedgerEvents syncEnv currentEpochNo@(EpochNo curEpoch) =
     handler ev =
       case ev of
         LedgerNewEpoch en ss -> do
-          lift $ do
+          lift $
             insertEpochSyncTime en (toSyncState ss) (envEpochSyncTime syncEnv)
           sqlBackend <- lift ask
           persistantCacheSize <- liftIO $ statementCacheSize $ connStmtMap sqlBackend
@@ -270,24 +276,24 @@ insertLedgerEvents syncEnv currentEpochNo@(EpochNo curEpoch) =
           liftIO . logInfo tracer $ "Starting at epoch " <> textShow (unEpochNo en)
         LedgerDeltaRewards _e rwd -> do
           let rewards = Map.toList $ Generic.unRewards rwd
-          insertRewards ntw (subFromCurrentEpoch 2) currentEpochNo cache (Map.toList $ Generic.unRewards rwd)
+          insertRewards syncEnv ntw (subFromCurrentEpoch 2) currentEpochNo cache (Map.toList $ Generic.unRewards rwd)
           -- This event is only created when it's not empty, so we don't need to check for null here.
           liftIO . logInfo tracer $ "Inserted " <> show (length rewards) <> " Delta rewards"
         LedgerIncrementalRewards _ rwd -> do
           let rewards = Map.toList $ Generic.unRewards rwd
-          insertRewards ntw (subFromCurrentEpoch 1) (EpochNo $ curEpoch + 1) cache rewards
-        LedgerRestrainedRewards e rwd creds -> do
+          insertRewards syncEnv ntw (subFromCurrentEpoch 1) (EpochNo $ curEpoch + 1) cache rewards
+        LedgerRestrainedRewards e rwd creds ->
           lift $ adjustEpochRewards tracer ntw cache e rwd creds
-        LedgerTotalRewards _e rwd -> do
+        LedgerTotalRewards _e rwd ->
           lift $ validateEpochRewards tracer ntw (subFromCurrentEpoch 2) currentEpochNo rwd
         LedgerAdaPots _ ->
           pure () -- These are handled separately by insertBlock
         LedgerMirDist rwd -> do
           unless (Map.null rwd) $ do
             let rewards = Map.toList rwd
-            insertRewards ntw (subFromCurrentEpoch 1) currentEpochNo cache rewards
+            insertRewards syncEnv ntw (subFromCurrentEpoch 1) currentEpochNo cache rewards
             liftIO . logInfo tracer $ "Inserted " <> show (length rewards) <> " Mir rewards"
-        LedgerPoolReap en drs -> do
+        LedgerPoolReap en drs ->
           unless (Map.null $ Generic.unRewards drs) $ do
             insertPoolDepositRefunds syncEnv en drs
         LedgerDeposits {} -> pure ()

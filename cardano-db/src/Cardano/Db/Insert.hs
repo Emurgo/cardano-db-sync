@@ -172,11 +172,23 @@ insertEpochSyncTime = insertReplace "EpochSyncTime"
 insertExtraKeyWitness :: (MonadBaseControl IO m, MonadIO m) => ExtraKeyWitness -> ReaderT SqlBackend m ExtraKeyWitnessId
 insertExtraKeyWitness = insertUnchecked "ExtraKeyWitness"
 
-insertManyEpochStakes :: (MonadBaseControl IO m, MonadIO m) => [EpochStake] -> ReaderT SqlBackend m ()
-insertManyEpochStakes = insertManyUncheckedUnique "Many EpochStake"
+insertManyEpochStakes ::
+  (MonadBaseControl IO m, MonadIO m) =>
+  -- | Does constraint already exists
+  Bool ->
+  ConstraintNameDB ->
+  [EpochStake] ->
+  ReaderT SqlBackend m ()
+insertManyEpochStakes = insertManyWithManualUnique "Many EpochStake"
 
-insertManyRewards :: (MonadBaseControl IO m, MonadIO m) => [Reward] -> ReaderT SqlBackend m ()
-insertManyRewards = insertManyUncheckedUnique "Many Rewards"
+insertManyRewards ::
+  (MonadBaseControl IO m, MonadIO m) =>
+  -- | Does constraint already exists
+  Bool ->
+  ConstraintNameDB ->
+  [Reward] ->
+  ReaderT SqlBackend m ()
+insertManyRewards = insertManyWithManualUnique "Many Rewards"
 
 insertManyTxIn :: (MonadBaseControl IO m, MonadIO m) => [TxIn] -> ReaderT SqlBackend m [TxInId]
 insertManyTxIn = insertMany' "Many TxIn"
@@ -308,7 +320,7 @@ insertEpochStakeProgress =
 
 updateSetComplete :: MonadIO m => Word64 -> ReaderT SqlBackend m ()
 updateSetComplete epoch = do
-  updateWhere [EpochStakeProgressEpochNo ==. epoch] [EpochStakeProgressCompleted =. True]
+  Database.Persist.updateWhere [EpochStakeProgressEpochNo Database.Persist.==. epoch] [EpochStakeProgressCompleted Database.Persist.=. True]
 
 replaceAdaPots :: (MonadBaseControl IO m, MonadIO m) => BlockId -> AdaPots -> ReaderT SqlBackend m Bool
 replaceAdaPots blockId adapots = do
@@ -379,16 +391,20 @@ insertMany' vtype records = handle exceptHandler (insertMany records)
     exceptHandler e =
       liftIO $ throwIO (DbInsertException vtype e)
 
-insertManyUncheckedUnique ::
+--
+insertManyUnique ::
   forall m record.
   ( MonadBaseControl IO m
   , MonadIO m
-  , OnlyOneUniqueKey record
+  , PersistEntity record
   ) =>
   String ->
+  -- | Does constraint already exists
+  Bool ->
+  ConstraintNameDB ->
   [record] ->
   ReaderT SqlBackend m ()
-insertManyUncheckedUnique vtype records =
+insertManyUnique vtype constraintExists constraintName records = do
   unless (null records) $
     handle exceptHandler (rawExecute query values)
   where
@@ -405,13 +421,22 @@ insertManyUncheckedUnique vtype records =
             . Util.parenWrapped
             . Util.commaSeparated
             $ placeholders
-        , " ON CONFLICT ON CONSTRAINT "
-        , unConstraintNameDB (uniqueDBName $ onlyOneUniqueDef (Proxy @record))
-        , " DO NOTHING"
+        , conflictQuery
         ]
 
     values :: [PersistValue]
     values = concatMap (map toPersistValue . toPersistFields) records
+
+    conflictQuery :: Text
+    conflictQuery =
+      if constraintExists
+        then
+          Text.concat
+            [ " ON CONFLICT ON CONSTRAINT "
+            , unConstraintNameDB constraintName
+            , " DO NOTHING"
+            ]
+        else ""
 
     fieldNames, placeholders :: [Text]
     (fieldNames, placeholders) =
@@ -420,6 +445,33 @@ insertManyUncheckedUnique vtype records =
     exceptHandler :: SqlError -> ReaderT SqlBackend m a
     exceptHandler e =
       liftIO $ throwIO (DbInsertException vtype e)
+
+insertManyWithManualUnique ::
+  forall m record.
+  ( MonadBaseControl IO m
+  , MonadIO m
+  , PersistRecordBackend record SqlBackend
+  ) =>
+  String ->
+  -- | Does constraint already exists
+  Bool ->
+  ConstraintNameDB ->
+  [record] ->
+  ReaderT SqlBackend m ()
+insertManyWithManualUnique = insertManyUnique
+
+insertManyUncheckedUnique ::
+  forall m record.
+  ( MonadBaseControl IO m
+  , MonadIO m
+  , OnlyOneUniqueKey record
+  ) =>
+  String ->
+  [record] ->
+  ReaderT SqlBackend m ()
+insertManyUncheckedUnique vtype records = do
+  let constraintName = uniqueDBName $ onlyOneUniqueDef (Proxy @record)
+  insertManyUnique vtype True constraintName records
 
 -- Insert, getting PostgreSQL to check the uniqueness constaint. If it is violated,
 -- simply returns the Key, without changing anything.
