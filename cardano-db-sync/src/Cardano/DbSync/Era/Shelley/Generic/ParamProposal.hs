@@ -16,7 +16,6 @@ import Cardano.DbSync.Era.Shelley.Generic.Witness (Witness (..))
 import Cardano.Ledger.Alonzo.Core
 import Cardano.Ledger.Alonzo.Language (Language)
 import qualified Cardano.Ledger.Alonzo.Scripts as Alonzo
-import Cardano.Ledger.Babbage.Core (ppuCoinsPerUTxOByteL, unCoinPerByte)
 import Cardano.Ledger.BaseTypes (UnitInterval, strictMaybeToMaybe)
 import qualified Cardano.Ledger.BaseTypes as Ledger
 import Cardano.Ledger.Coin (Coin, unCoin)
@@ -29,6 +28,8 @@ import qualified Data.Map.Strict as Map
 #if __GLASGOW_HASKELL__ >= 906
 import Data.Type.Equality (type (~))
 #endif
+import Cardano.Ledger.Conway.Core
+import Cardano.Ledger.Conway.PParams
 import Lens.Micro ((^.))
 import Ouroboros.Consensus.Cardano.Block (StandardAlonzo, StandardBabbage, StandardConway)
 
@@ -64,6 +65,15 @@ data ParamProposal = ParamProposal
   , pppMaxValSize :: !(Maybe Natural)
   , pppCollateralPercentage :: !(Maybe Natural)
   , pppMaxCollateralInputs :: !(Maybe Natural)
+  , -- New for Conway.
+    pppPoolVotingThresholds :: !(Maybe PoolVotingThresholds)
+  , pppDRepVotingThresholds :: !(Maybe DRepVotingThresholds)
+  , pppCommitteeMinSize :: !(Maybe Natural)
+  , pppCommitteeMaxTermLength :: !(Maybe Natural)
+  , pppGovActionLifetime :: !(Maybe EpochNo)
+  , pppGovActionDeposit :: !(Maybe Natural)
+  , pppDRepDeposit :: !(Maybe Natural)
+  , pppDRepActivity :: !(Maybe EpochNo)
   }
 
 convertParamProposal :: EraCrypto era ~ StandardCrypto => Witness era -> Shelley.Update era -> [ParamProposal]
@@ -124,6 +134,15 @@ convertConwayParamProposal pmap =
     , pppMaxValSize = strictMaybeToMaybe (pmap ^. ppuMaxValSizeL)
     , pppCollateralPercentage = strictMaybeToMaybe (pmap ^. ppuCollateralPercentageL)
     , pppMaxCollateralInputs = strictMaybeToMaybe (pmap ^. ppuMaxCollateralInputsL)
+    , -- New for Conway.
+      pppPoolVotingThresholds = strictMaybeToMaybe (pmap ^. ppuPoolVotingThresholdsL)
+    , pppDRepVotingThresholds = strictMaybeToMaybe (pmap ^. ppuDRepVotingThresholdsL)
+    , pppCommitteeMinSize = strictMaybeToMaybe (pmap ^. ppuCommitteeMinSizeL)
+    , pppCommitteeMaxTermLength = strictMaybeToMaybe (pmap ^. ppuCommitteeMaxTermLengthL)
+    , pppGovActionLifetime = strictMaybeToMaybe (pmap ^. ppuGovActionLifetimeL)
+    , pppGovActionDeposit = fromIntegral . unCoin <$> strictMaybeToMaybe (pmap ^. ppuGovActionDepositL)
+    , pppDRepDeposit = fromIntegral . unCoin <$> strictMaybeToMaybe (pmap ^. ppuDRepDepositL)
+    , pppDRepActivity = strictMaybeToMaybe (pmap ^. ppuDRepActivityL)
     }
 
 convertBabbageParamProposal :: EpochNo -> (Ledger.KeyHash genesis StandardCrypto, PParamsUpdate StandardBabbage) -> ParamProposal
@@ -159,6 +178,14 @@ convertBabbageParamProposal epochNo (key, pmap) =
     , pppMaxValSize = strictMaybeToMaybe (pmap ^. ppuMaxValSizeL)
     , pppCollateralPercentage = strictMaybeToMaybe (pmap ^. ppuCollateralPercentageL)
     , pppMaxCollateralInputs = strictMaybeToMaybe (pmap ^. ppuMaxCollateralInputsL)
+    , pppPoolVotingThresholds = Nothing
+    , pppDRepVotingThresholds = Nothing
+    , pppCommitteeMinSize = Nothing
+    , pppCommitteeMaxTermLength = Nothing
+    , pppGovActionLifetime = Nothing
+    , pppGovActionDeposit = Nothing
+    , pppDRepDeposit = Nothing
+    , pppDRepActivity = Nothing
     }
 
 convertAlonzoParamProposal :: EpochNo -> (Ledger.KeyHash genesis crypto, PParamsUpdate StandardAlonzo) -> ParamProposal
@@ -195,6 +222,14 @@ convertAlonzoParamProposal epochNo (key, pmap) =
     , pppMaxValSize = strictMaybeToMaybe (pmap ^. ppuMaxValSizeL)
     , pppCollateralPercentage = strictMaybeToMaybe (pmap ^. ppuCollateralPercentageL)
     , pppMaxCollateralInputs = strictMaybeToMaybe (pmap ^. ppuMaxCollateralInputsL)
+    , pppPoolVotingThresholds = Nothing
+    , pppDRepVotingThresholds = Nothing
+    , pppCommitteeMinSize = Nothing
+    , pppCommitteeMaxTermLength = Nothing
+    , pppGovActionLifetime = Nothing
+    , pppGovActionDeposit = Nothing
+    , pppDRepDeposit = Nothing
+    , pppDRepActivity = Nothing
     }
 
 -- | This works fine from Shelley to Mary. Not for Alonzo since 'ppuMinUTxOValueL' was removed
@@ -232,4 +267,12 @@ convertShelleyParamProposal epochNo (key, pmap) =
     , pppMaxValSize = Nothing
     , pppCollateralPercentage = Nothing
     , pppMaxCollateralInputs = Nothing
+    , pppPoolVotingThresholds = Nothing
+    , pppDRepVotingThresholds = Nothing
+    , pppCommitteeMinSize = Nothing
+    , pppCommitteeMaxTermLength = Nothing
+    , pppGovActionLifetime = Nothing
+    , pppGovActionDeposit = Nothing
+    , pppDRepDeposit = Nothing
+    , pppDRepActivity = Nothing
     }

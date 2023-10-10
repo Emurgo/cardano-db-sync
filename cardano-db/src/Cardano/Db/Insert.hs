@@ -18,6 +18,7 @@ module Cardano.Db.Insert (
   insertExtraKeyWitness,
   insertManyEpochStakes,
   insertManyRewards,
+  insertManyDrepDistr,
   insertManyTxIn,
   insertMaTxMint,
   insertManyMaTxOut,
@@ -58,6 +59,8 @@ module Cardano.Db.Insert (
   insertExtraMigration,
   insertEpochStakeProgress,
   updateSetComplete,
+  updateGovAction,
+  setNullEnacted,
   replaceAdaPots,
   insertAnchor,
   insertGovernanceAction,
@@ -69,7 +72,6 @@ module Cardano.Db.Insert (
   insertCommitteeRegistration,
   insertCommitteeDeRegistration,
   insertDrepRegistration,
-  insertDrepDeRegistration,
   insertUnchecked,
   insertMany',
   -- Export mainly for testing.
@@ -91,7 +93,7 @@ import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
-import Database.Persist (updateWhere, (=.), (==.))
+import Database.Persist (updateWhere, (!=.), (=.), (==.), (>.))
 import Database.Persist.Class (
   AtLeastOneUniqueKey,
   PersistEntity,
@@ -189,6 +191,12 @@ insertManyRewards ::
   [Reward] ->
   ReaderT SqlBackend m ()
 insertManyRewards = insertManyWithManualUnique "Many Rewards"
+
+insertManyDrepDistr ::
+  (MonadBaseControl IO m, MonadIO m) =>
+  [DrepDistr] ->
+  ReaderT SqlBackend m ()
+insertManyDrepDistr = insertManyUncheckedUnique "Many DrepDistr"
 
 insertManyTxIn :: (MonadBaseControl IO m, MonadIO m) => [TxIn] -> ReaderT SqlBackend m [TxInId]
 insertManyTxIn = insertMany' "Many TxIn"
@@ -320,7 +328,15 @@ insertEpochStakeProgress =
 
 updateSetComplete :: MonadIO m => Word64 -> ReaderT SqlBackend m ()
 updateSetComplete epoch = do
-  Database.Persist.updateWhere [EpochStakeProgressEpochNo Database.Persist.==. epoch] [EpochStakeProgressCompleted Database.Persist.=. True]
+  updateWhere [EpochStakeProgressEpochNo Database.Persist.==. epoch] [EpochStakeProgressCompleted Database.Persist.=. True]
+
+updateGovAction :: MonadIO m => GovernanceActionId -> Word64 -> ReaderT SqlBackend m ()
+updateGovAction gaid eNo =
+  updateWhere [GovernanceActionId ==. gaid, GovernanceActionEnactedEpoch ==. Nothing] [GovernanceActionEnactedEpoch =. Just eNo]
+
+setNullEnacted :: MonadIO m => Word64 -> ReaderT SqlBackend m ()
+setNullEnacted eNo =
+  updateWhere [GovernanceActionEnactedEpoch !=. Nothing, GovernanceActionEnactedEpoch >. Just eNo] [GovernanceActionEnactedEpoch =. Nothing]
 
 replaceAdaPots :: (MonadBaseControl IO m, MonadIO m) => BlockId -> AdaPots -> ReaderT SqlBackend m Bool
 replaceAdaPots blockId adapots = do
@@ -335,7 +351,7 @@ replaceAdaPots blockId adapots = do
       pure True
 
 insertAnchor :: (MonadBaseControl IO m, MonadIO m) => VotingAnchor -> ReaderT SqlBackend m VotingAnchorId
-insertAnchor = insertUnchecked "VotingAnchor"
+insertAnchor = insertCheckUnique "VotingAnchor"
 
 insertGovernanceAction :: (MonadBaseControl IO m, MonadIO m) => GovernanceAction -> ReaderT SqlBackend m GovernanceActionId
 insertGovernanceAction = insertUnchecked "GovernanceAction"
@@ -363,9 +379,6 @@ insertCommitteeDeRegistration = insertUnchecked "CommitteeDeRegistration"
 
 insertDrepRegistration :: (MonadBaseControl IO m, MonadIO m) => DrepRegistration -> ReaderT SqlBackend m DrepRegistrationId
 insertDrepRegistration = insertUnchecked "DrepRegistration"
-
-insertDrepDeRegistration :: (MonadBaseControl IO m, MonadIO m) => DrepDeRegistration -> ReaderT SqlBackend m DrepDeRegistrationId
-insertDrepDeRegistration = insertUnchecked "DrepDeRegistration"
 
 -- -----------------------------------------------------------------------------
 

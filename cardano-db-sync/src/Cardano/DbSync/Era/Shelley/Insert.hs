@@ -53,9 +53,10 @@ import Cardano.DbSync.Era.Shelley.Offline
 import Cardano.DbSync.Era.Shelley.Query
 import Cardano.DbSync.Era.Util (liftLookupFail, safeDecodeToJson)
 import Cardano.DbSync.Error
-import Cardano.DbSync.Ledger.Types (ApplyResult (..), DepositsMap, lookupDepositsMap)
+import Cardano.DbSync.Ledger.Types (ApplyResult (..), getGovExpiresAt, lookupDepositsMap)
 import Cardano.DbSync.Types
 import Cardano.DbSync.Util
+import Cardano.DbSync.Util.Bech32
 import Cardano.DbSync.Util.Cbor (serialiseTxMetadataToCbor)
 import qualified Cardano.Ledger.Address as Ledger
 import Cardano.Ledger.Alonzo.Language (Language)
@@ -64,10 +65,13 @@ import Cardano.Ledger.BaseTypes (getVersion, strictMaybeToMaybe)
 import qualified Cardano.Ledger.BaseTypes as Ledger
 import Cardano.Ledger.Coin (Coin (..))
 import qualified Cardano.Ledger.Coin as Ledger
+import Cardano.Ledger.Compactible (fromCompact)
+import Cardano.Ledger.Conway.Core (DRepVotingThresholds (..), PoolVotingThresholds (..))
 import Cardano.Ledger.Conway.Governance
 import Cardano.Ledger.Conway.TxCert
 import Cardano.Ledger.Core
 import qualified Cardano.Ledger.Credential as Ledger
+import Cardano.Ledger.DRepDistr (extractDRepDistr)
 import Cardano.Ledger.Keys
 import qualified Cardano.Ledger.Keys as Ledger
 import Cardano.Ledger.Mary.Value (AssetName (..), MultiAsset (..), PolicyID (..))
@@ -77,15 +81,18 @@ import Cardano.Ledger.Shelley.TxCert
 import Cardano.Prelude
 import Cardano.Slotting.Block (BlockNo (..))
 import Cardano.Slotting.Slot (EpochNo (..), EpochSize (..), SlotNo (..))
+import Control.Monad.Extra (whenJust)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Control.Monad.Trans.Except.Extra (newExceptT)
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Either.Extra (eitherToMaybe)
 import Data.Group (invert)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text.Encoding as Text
 import Database.Persist.Sql (SqlBackend)
+import Lens.Micro
 import Ouroboros.Consensus.Cardano.Block (StandardConway, StandardCrypto)
 
 {- HLINT ignore "Reduce duplication" -}
@@ -134,7 +141,7 @@ insertShelleyBlock syncEnv shouldLog withinTwoMins withinHalfHour blk details is
           }
 
     let zippedTx = zip [0 ..] (Generic.blkTxs blk)
-    let txInserter = insertTx syncEnv isMember blkId (sdEpochNo details) (Generic.blkSlotNo blk) (apDepositsMap applyResult)
+    let txInserter = insertTx syncEnv isMember blkId (sdEpochNo details) (Generic.blkSlotNo blk) applyResult
     blockGroupedData <- foldM (\gp (idx, tx) -> txInserter idx tx gp) mempty zippedTx
     minIds <- insertBlockGroupedData syncEnv blockGroupedData
 
@@ -240,6 +247,10 @@ insertOnNewEpoch tracer blkId slotNo epochNo newEpoch = do
     lift $ insertEpochParam tracer blkId epochNo params (Generic.euNonce epochUpdate)
   whenStrictJust (Generic.neAdaPots newEpoch) $ \pots ->
     insertPots blkId slotNo epochNo pots
+  whenStrictJust (Generic.neDRepDistr newEpoch) $ \dreps ->
+    lift $ insertDrepDistr epochNo $ extractDRepDistr dreps
+  whenStrictJust (Generic.neEnacted newEpoch) $ \enactedSt ->
+    updateEnacted epochNo enactedSt
   where
     epochUpdate :: Generic.EpochUpdate
     epochUpdate = Generic.neEpochUpdate newEpoch
@@ -253,14 +264,14 @@ insertTx ::
   DB.BlockId ->
   EpochNo ->
   SlotNo ->
-  DepositsMap ->
+  ApplyResult ->
   Word64 ->
   Generic.Tx ->
   BlockGroupedData ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) BlockGroupedData
-insertTx syncEnv isMember blkId epochNo slotNo depositsMap blockIndex tx grouped = do
+insertTx syncEnv isMember blkId epochNo slotNo applyResult blockIndex tx grouped = do
   let !txHash = Generic.txHash tx
-  let !mdeposits = if not (Generic.txValidContract tx) then Just (Coin 0) else lookupDepositsMap txHash depositsMap
+  let !mdeposits = if not (Generic.txValidContract tx) then Just (Coin 0) else lookupDepositsMap txHash (apDepositsMap applyResult)
   let !outSum = fromIntegral $ unCoin $ Generic.txOutSum tx
       !withdrawalSum = fromIntegral $ unCoin $ Generic.txWithdrawalSum tx
       hasConsumed = getHasConsumedOrPruneTxOut syncEnv
@@ -345,7 +356,7 @@ insertTx syncEnv isMember blkId epochNo slotNo depositsMap blockIndex tx grouped
           Generic.txScripts tx
 
       mapM_ (insertExtraKeyWitness tracer txId) $ Generic.txExtraKeyWitnesses tx
-      mapM_ (lift . insertGovernanceAction cache network blkId txId) $ zip [0 ..] (Generic.txProposalProcedure tx)
+      mapM_ (lift . insertGovernanceAction cache network blkId txId (getGovExpiresAt applyResult epochNo)) $ zip [0 ..] (Generic.txProposalProcedure tx)
       mapM_ (insertVotingProcedures cache txId) (Generic.txVotingProcedure tx)
 
       let !txIns = map (prepareTxIn txId redeemers) resolvedInputs
@@ -508,17 +519,16 @@ insertCertificate tracer cache isMember network blkId txId epochNo slotNo redeem
     Right (ConwayTxCertDeleg deleg) -> insertConwayDelegCert cache network txId idx mRedeemerId epochNo slotNo deleg
     Right (ConwayTxCertPool pool) -> insertPoolCert tracer cache isMember network epochNo blkId txId idx pool
     Right (ConwayTxCertGov c) -> case c of
-      ConwayRegDRep cred coin _anchor ->
-        -- TODO: Conway handle anchor
-        lift $ insertDrepRegistration txId idx cred coin
+      ConwayRegDRep cred coin anchor ->
+        lift $ insertDrepRegistration txId idx cred (Just coin) (strictMaybeToMaybe anchor)
       ConwayUnRegDRep cred coin ->
         lift $ insertDrepDeRegistration txId idx cred coin
       ConwayAuthCommitteeHotKey khCold khHot ->
         lift $ insertCommitteeRegistration txId idx khCold khHot
       ConwayResignCommitteeColdKey khCold ->
         lift $ insertCommitteeDeRegistration txId idx khCold
-      ConwayUpdateDRep {} ->
-        liftIO $ logWarning tracer "insertCertificate: Unhandled ConwayUpdateDRep certificate"
+      ConwayUpdateDRep cred anchor ->
+        lift $ insertDrepRegistration txId idx cred Nothing (strictMaybeToMaybe anchor)
   where
     mRedeemerId = mlookup ridx redeemers
 
@@ -557,15 +567,18 @@ insertDrepRegistration ::
   DB.TxId ->
   Word16 ->
   Ledger.Credential 'DRepRole StandardCrypto ->
-  Coin ->
+  Maybe Coin ->
+  Maybe (Anchor StandardCrypto) ->
   ReaderT SqlBackend m ()
-insertDrepRegistration txId idx cred coin = do
+insertDrepRegistration txId idx cred mcoin mAnchor = do
   drepId <- insertCredDrepHash cred
+  votingAnchorId <- whenMaybe mAnchor $ insertAnchor txId
   void . DB.insertDrepRegistration $
     DB.DrepRegistration
       { DB.drepRegistrationTxId = txId
       , DB.drepRegistrationCertIndex = idx
-      , DB.drepRegistrationDeposit = Generic.coinToDbLovelace coin
+      , DB.drepRegistrationDeposit = fromIntegral . unCoin <$> mcoin
+      , DB.drepRegistrationVotingAnchorId = votingAnchorId
       , DB.drepRegistrationDrepHashId = drepId
       }
 
@@ -578,12 +591,13 @@ insertDrepDeRegistration ::
   ReaderT SqlBackend m ()
 insertDrepDeRegistration txId idx cred coin = do
   drepId <- insertCredDrepHash cred
-  void . DB.insertDrepDeRegistration $
-    DB.DrepDeRegistration
-      { DB.drepDeRegistrationTxId = txId
-      , DB.drepDeRegistrationCertIndex = idx
-      , DB.drepDeRegistrationDeposit = Generic.coinToDbLovelace coin
-      , DB.drepDeRegistrationDrepHashId = drepId
+  void . DB.insertDrepRegistration $
+    DB.DrepRegistration
+      { DB.drepRegistrationTxId = txId
+      , DB.drepRegistrationCertIndex = idx
+      , DB.drepRegistrationDeposit = Just (-(fromIntegral $ unCoin coin))
+      , DB.drepRegistrationVotingAnchorId = Nothing
+      , DB.drepRegistrationDrepHashId = drepId
       }
 
 insertPoolCert ::
@@ -868,7 +882,6 @@ insertDelegation cache network (EpochNo epoch) slotNo txId idx mRedeemerId cred 
       , DB.delegationTxId = txId
       , DB.delegationSlotNo = unSlotNo slotNo
       , DB.delegationRedeemerId = mRedeemerId
-      , DB.delegationDeposit = Nothing
       }
 
 insertDelegationVote ::
@@ -888,7 +901,6 @@ insertDelegationVote cache network txId idx cred drep = do
       { DB.delegationVoteAddrId = addrId
       , DB.delegationVoteCertIndex = idx
       , DB.delegationVoteDrepHashId = drepId
-      , DB.delegationVoteActiveEpochNo = 0 -- TODO: Conway
       , DB.delegationVoteTxId = txId
       , DB.delegationVoteRedeemerId = Nothing
       }
@@ -1034,16 +1046,15 @@ insertParamProposal blkId txId pp = do
       , DB.paramProposalMaxEpoch = unEpochNo <$> pppMaxEpoch pp
       , DB.paramProposalOptimalPoolCount = fromIntegral <$> pppOptimalPoolCount pp
       , DB.paramProposalInfluence = fromRational <$> pppInfluence pp
-      , DB.paramProposalMonetaryExpandRate = Generic.unitIntervalToDouble <$> pppMonetaryExpandRate pp
-      , DB.paramProposalTreasuryGrowthRate = Generic.unitIntervalToDouble <$> pppTreasuryGrowthRate pp
-      , DB.paramProposalDecentralisation = Generic.unitIntervalToDouble <$> pppDecentralisation pp
+      , DB.paramProposalMonetaryExpandRate = toDouble <$> pppMonetaryExpandRate pp
+      , DB.paramProposalTreasuryGrowthRate = toDouble <$> pppTreasuryGrowthRate pp
+      , DB.paramProposalDecentralisation = toDouble <$> pppDecentralisation pp
       , DB.paramProposalEntropy = Generic.nonceToBytes =<< pppEntropy pp
       , DB.paramProposalProtocolMajor = getVersion . Ledger.pvMajor <$> pppProtocolVersion pp
       , DB.paramProposalProtocolMinor = fromIntegral . Ledger.pvMinor <$> pppProtocolVersion pp
       , DB.paramProposalMinUtxoValue = Generic.coinToDbLovelace <$> pppMinUtxoValue pp
       , DB.paramProposalMinPoolCost = Generic.coinToDbLovelace <$> pppMinPoolCost pp
       , -- New for Alonzo
-
         DB.paramProposalCoinsPerUtxoSize = Generic.coinToDbLovelace <$> pppCoinsPerUtxo pp
       , DB.paramProposalCostModelId = cmId
       , DB.paramProposalPriceMem = realToFrac <$> pppPriceMem pp
@@ -1055,7 +1066,31 @@ insertParamProposal blkId txId pp = do
       , DB.paramProposalMaxValSize = DbWord64 . fromIntegral <$> pppMaxValSize pp
       , DB.paramProposalCollateralPercent = fromIntegral <$> pppCollateralPercentage pp
       , DB.paramProposalMaxCollateralInputs = fromIntegral <$> pppMaxCollateralInputs pp
+      , -- New for Conway
+        DB.paramProposalPvtMotionNoConfidence = toDouble . pvtMotionNoConfidence <$> pppPoolVotingThresholds pp
+      , DB.paramProposalPvtCommitteeNormal = toDouble . pvtCommitteeNormal <$> pppPoolVotingThresholds pp
+      , DB.paramProposalPvtCommitteeNoConfidence = toDouble . pvtCommitteeNoConfidence <$> pppPoolVotingThresholds pp
+      , DB.paramProposalPvtHardForkInitiation = toDouble . pvtHardForkInitiation <$> pppPoolVotingThresholds pp
+      , DB.paramProposalDvtMotionNoConfidence = toDouble . dvtMotionNoConfidence <$> pppDRepVotingThresholds pp
+      , DB.paramProposalDvtCommitteeNormal = toDouble . dvtCommitteeNormal <$> pppDRepVotingThresholds pp
+      , DB.paramProposalDvtCommitteeNoConfidence = toDouble . dvtCommitteeNoConfidence <$> pppDRepVotingThresholds pp
+      , DB.paramProposalDvtUpdateToConstitution = toDouble . dvtUpdateToConstitution <$> pppDRepVotingThresholds pp
+      , DB.paramProposalDvtHardForkInitiation = toDouble . dvtHardForkInitiation <$> pppDRepVotingThresholds pp
+      , DB.paramProposalDvtPPNetworkGroup = toDouble . dvtPPNetworkGroup <$> pppDRepVotingThresholds pp
+      , DB.paramProposalDvtPPEconomicGroup = toDouble . dvtPPEconomicGroup <$> pppDRepVotingThresholds pp
+      , DB.paramProposalDvtPPTechnicalGroup = toDouble . dvtPPTechnicalGroup <$> pppDRepVotingThresholds pp
+      , DB.paramProposalDvtPPGovGroup = toDouble . dvtPPGovGroup <$> pppDRepVotingThresholds pp
+      , DB.paramProposalDvtTreasuryWithdrawal = toDouble . dvtTreasuryWithdrawal <$> pppDRepVotingThresholds pp
+      , DB.paramProposalCommitteeMinSize = DbWord64 . fromIntegral <$> pppCommitteeMinSize pp
+      , DB.paramProposalCommitteeMaxTermLength = DbWord64 . fromIntegral <$> pppCommitteeMaxTermLength pp
+      , DB.paramProposalGovActionLifetime = unEpochNo <$> pppGovActionLifetime pp
+      , DB.paramProposalGovActionDeposit = DbWord64 . fromIntegral <$> pppGovActionDeposit pp
+      , DB.paramProposalDrepDeposit = DbWord64 . fromIntegral <$> pppDRepDeposit pp
+      , DB.paramProposalDrepActivity = unEpochNo <$> pppDRepActivity pp
       }
+
+toDouble :: Ledger.UnitInterval -> Double
+toDouble = Generic.unitIntervalToDouble
 
 insertRedeemer ::
   (MonadBaseControl IO m, MonadIO m) =>
@@ -1202,9 +1237,9 @@ insertEpochParam _tracer blkId (EpochNo epoch) params nonce = do
       , DB.epochParamMaxEpoch = unEpochNo (Generic.ppMaxEpoch params)
       , DB.epochParamOptimalPoolCount = fromIntegral (Generic.ppOptialPoolCount params)
       , DB.epochParamInfluence = fromRational (Generic.ppInfluence params)
-      , DB.epochParamMonetaryExpandRate = Generic.unitIntervalToDouble (Generic.ppMonetaryExpandRate params)
-      , DB.epochParamTreasuryGrowthRate = Generic.unitIntervalToDouble (Generic.ppTreasuryGrowthRate params)
-      , DB.epochParamDecentralisation = Generic.unitIntervalToDouble (Generic.ppDecentralisation params)
+      , DB.epochParamMonetaryExpandRate = toDouble (Generic.ppMonetaryExpandRate params)
+      , DB.epochParamTreasuryGrowthRate = toDouble (Generic.ppTreasuryGrowthRate params)
+      , DB.epochParamDecentralisation = toDouble (Generic.ppDecentralisation params)
       , DB.epochParamExtraEntropy = Generic.nonceToBytes $ Generic.ppExtraEntropy params
       , DB.epochParamProtocolMajor = getVersion $ Ledger.pvMajor (Generic.ppProtocolVersion params)
       , DB.epochParamProtocolMinor = fromIntegral $ Ledger.pvMinor (Generic.ppProtocolVersion params)
@@ -1222,6 +1257,26 @@ insertEpochParam _tracer blkId (EpochNo epoch) params nonce = do
       , DB.epochParamMaxValSize = DbWord64 . fromIntegral <$> Generic.ppMaxValSize params
       , DB.epochParamCollateralPercent = fromIntegral <$> Generic.ppCollateralPercentage params
       , DB.epochParamMaxCollateralInputs = fromIntegral <$> Generic.ppMaxCollateralInputs params
+      , DB.epochParamPvtMotionNoConfidence = toDouble . pvtMotionNoConfidence <$> Generic.ppPoolVotingThresholds params
+      , DB.epochParamPvtCommitteeNormal = toDouble . pvtCommitteeNormal <$> Generic.ppPoolVotingThresholds params
+      , DB.epochParamPvtCommitteeNoConfidence = toDouble . pvtCommitteeNoConfidence <$> Generic.ppPoolVotingThresholds params
+      , DB.epochParamPvtHardForkInitiation = toDouble . pvtHardForkInitiation <$> Generic.ppPoolVotingThresholds params
+      , DB.epochParamDvtMotionNoConfidence = toDouble . dvtMotionNoConfidence <$> Generic.ppDRepVotingThresholds params
+      , DB.epochParamDvtCommitteeNormal = toDouble . dvtCommitteeNormal <$> Generic.ppDRepVotingThresholds params
+      , DB.epochParamDvtCommitteeNoConfidence = toDouble . dvtCommitteeNoConfidence <$> Generic.ppDRepVotingThresholds params
+      , DB.epochParamDvtUpdateToConstitution = toDouble . dvtUpdateToConstitution <$> Generic.ppDRepVotingThresholds params
+      , DB.epochParamDvtHardForkInitiation = toDouble . dvtHardForkInitiation <$> Generic.ppDRepVotingThresholds params
+      , DB.epochParamDvtPPNetworkGroup = toDouble . dvtPPNetworkGroup <$> Generic.ppDRepVotingThresholds params
+      , DB.epochParamDvtPPEconomicGroup = toDouble . dvtPPEconomicGroup <$> Generic.ppDRepVotingThresholds params
+      , DB.epochParamDvtPPTechnicalGroup = toDouble . dvtPPTechnicalGroup <$> Generic.ppDRepVotingThresholds params
+      , DB.epochParamDvtPPGovGroup = toDouble . dvtPPGovGroup <$> Generic.ppDRepVotingThresholds params
+      , DB.epochParamDvtTreasuryWithdrawal = toDouble . dvtTreasuryWithdrawal <$> Generic.ppDRepVotingThresholds params
+      , DB.epochParamCommitteeMinSize = DbWord64 . fromIntegral <$> Generic.ppCommitteeMinSize params
+      , DB.epochParamCommitteeMaxTermLength = DbWord64 . fromIntegral <$> Generic.ppCommitteeMaxTermLength params
+      , DB.epochParamGovActionLifetime = unEpochNo <$> Generic.ppGovActionLifetime params
+      , DB.epochParamGovActionDeposit = DbWord64 . fromIntegral <$> Generic.ppGovActionDeposit params
+      , DB.epochParamDrepDeposit = DbWord64 . fromIntegral <$> Generic.ppDRepDeposit params
+      , DB.epochParamDrepActivity = unEpochNo <$> Generic.ppDRepActivity params
       , DB.epochParamBlockId = blkId
       }
 
@@ -1379,9 +1434,10 @@ insertGovernanceAction ::
   Ledger.Network ->
   DB.BlockId ->
   DB.TxId ->
+  Maybe EpochNo ->
   (Word64, ProposalProcedure StandardConway) ->
   ReaderT SqlBackend m ()
-insertGovernanceAction cache _network blkId txId (index, pp) = do
+insertGovernanceAction cache _network blkId txId govExpiresAt (index, pp) = do
   addrId <-
     insertStakeAddressWithCache cache CacheNew txId $ pProcReturnAddr pp
   votingAnchorId <- insertAnchor txId $ pProcAnchor pp
@@ -1397,6 +1453,7 @@ insertGovernanceAction cache _network blkId txId (index, pp) = do
         , DB.governanceActionIndex = index
         , DB.governanceActionDeposit = Generic.coinToDbLovelace $ pProcDeposit pp
         , DB.governanceActionReturnAddress = addrId
+        , DB.governanceActionExpiration = unEpochNo <$> govExpiresAt
         , DB.governanceActionVotingAnchorId = Just votingAnchorId
         , DB.governanceActionType = Generic.toGovAction $ pProcGovAction pp
         , DB.governanceActionDescription = textShow $ pProcGovAction pp
@@ -1408,7 +1465,7 @@ insertGovernanceAction cache _network blkId txId (index, pp) = do
         }
   case pProcGovAction pp of
     TreasuryWithdrawals mp -> mapM_ (insertTreasuryWithdrawal governanceAction) (Map.toList mp)
-    NewCommittee _ st committee -> insertNewCommittee governanceAction st committee
+    UpdateCommittee _ removed added q -> insertNewCommittee governanceAction removed added q
     _ -> pure ()
   where
     insertTreasuryWithdrawal gaId (cred, coin) = do
@@ -1421,12 +1478,13 @@ insertGovernanceAction cache _network blkId txId (index, pp) = do
           , DB.treasuryWithdrawalAmount = Generic.coinToDbLovelace coin
           }
 
-    insertNewCommittee gaId st committee = do
+    insertNewCommittee gaId removed added q = do
       void . DB.insertNewCommittee $
         DB.NewCommittee
           { DB.newCommitteeGovernanceActionId = gaId
-          , DB.newCommitteeQuorum = Generic.unitIntervalToDouble $ committeeQuorum committee
-          , DB.newCommitteeMembers = textShow st
+          , DB.newCommitteeQuorum = toDouble q
+          , DB.newCommitteeDeletedMembers = textShow removed
+          , DB.newCommitteeAddedMembers = textShow added
           }
 
 insertAnchor :: (MonadIO m, MonadBaseControl IO m) => DB.TxId -> Anchor StandardCrypto -> ReaderT SqlBackend m DB.VotingAnchorId
@@ -1434,7 +1492,7 @@ insertAnchor txId anchor =
   DB.insertAnchor $
     DB.VotingAnchor
       { DB.votingAnchorTxId = txId
-      , DB.votingAnchorUrl = DB.VoteUrl $ Ledger.urlToText $ anchorUrl anchor
+      , DB.votingAnchorUrl = DB.VoteUrl $ Ledger.urlToText $ anchorUrl anchor -- TODO: Conway check unicode and size of URL
       , DB.votingAnchorDataHash = Generic.achorHashToBytes $ anchorDataHash anchor
       }
 
@@ -1499,15 +1557,15 @@ insertDrep = \case
   DRepAlwaysAbstain ->
     DB.insertDrepHash
       DB.DrepHash
-        { DB.drepHashRaw = Nothing
-        , DB.drepHashView = Just "AlwaysAbstain"
+        { DB.drepHashRaw = BS.replicate 28 '\0'
+        , DB.drepHashView = "drep_always_abstain"
         , DB.drepHashHasScript = False
         }
   DRepAlwaysNoConfidence ->
     DB.insertDrepHash
       DB.DrepHash
-        { DB.drepHashRaw = Nothing
-        , DB.drepHashView = Just "AlwaysNoConfidence"
+        { DB.drepHashRaw = BS.replicate 28 '\0'
+        , DB.drepHashView = "drep_always_no_confidence"
         , DB.drepHashHasScript = False
         }
 
@@ -1515,7 +1573,33 @@ insertCredDrepHash :: (MonadBaseControl IO m, MonadIO m) => Ledger.Credential 'D
 insertCredDrepHash cred = do
   DB.insertDrepHash
     DB.DrepHash
-      { DB.drepHashRaw = Just $ Generic.unCredentialHash cred
-      , DB.drepHashView = Nothing
+      { DB.drepHashRaw = bs
+      , DB.drepHashView = serialiseDrepToBech32 bs
       , DB.drepHashHasScript = Generic.hasCredScript cred
       }
+  where
+    bs = Generic.unCredentialHash cred
+
+insertDrepDistr :: forall m. (MonadBaseControl IO m, MonadIO m) => EpochNo -> Map (DRep StandardCrypto) (Ledger.CompactForm Coin) -> ReaderT SqlBackend m ()
+insertDrepDistr e dreps = do
+  drepsDB <- mapM mkEntry (Map.toList dreps)
+  DB.insertManyDrepDistr drepsDB
+  where
+    mkEntry :: (DRep StandardCrypto, Ledger.CompactForm Coin) -> ReaderT SqlBackend m DB.DrepDistr
+    mkEntry (drep, coin) = do
+      drepId <- insertDrep drep
+      pure $
+        DB.DrepDistr
+          { DB.drepDistrHashId = drepId
+          , DB.drepDistrAmount = fromIntegral $ unCoin $ fromCompact coin
+          , DB.drepDistrEpochNo = unEpochNo e
+          , DB.drepDistrActiveUntil = Nothing
+          }
+
+updateEnacted :: forall m. (MonadBaseControl IO m, MonadIO m) => EpochNo -> EnactState StandardConway -> ExceptT SyncNodeError (ReaderT SqlBackend m) ()
+updateEnacted epochNo enactedState = do
+  whenJust (strictMaybeToMaybe (enactedState ^. ensPrevPParamUpdateL)) $ \prevId -> do
+    gaId <- resolveGovernanceAction $ getPrevId prevId
+    lift $ DB.updateGovAction gaId (unEpochNo epochNo)
+  where
+    getPrevId (PrevGovActionId gai) = gai

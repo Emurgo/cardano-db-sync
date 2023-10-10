@@ -15,6 +15,7 @@
 module Cardano.DbSync.Ledger.State (
   applyBlock,
   defaultApplyResult,
+  getGovExpiresAt,
   mkHasLedgerEnv,
   applyBlockAndSnapshot,
   listLedgerStateFilesOrdered,
@@ -43,7 +44,6 @@ import Cardano.DbSync.Util
 import qualified Cardano.Ledger.Alonzo.PParams as Alonzo
 import Cardano.Ledger.Alonzo.Scripts
 import qualified Cardano.Ledger.BaseTypes as Ledger
-import Cardano.Ledger.Era (EraCrypto)
 import Cardano.Ledger.Shelley.AdaPots (AdaPots)
 import qualified Cardano.Ledger.Shelley.LedgerState as Shelley
 import Cardano.Prelude hiding (atomically)
@@ -72,6 +72,11 @@ import Data.Type.Equality (type (~))
 
 import Cardano.DbSync.Api.Types (LedgerEnv (..), SyncOptions (..))
 import Cardano.DbSync.Error (SyncNodeError (..), fromEitherSTM)
+import Cardano.Ledger.Conway.Core as Shelley
+import Cardano.Ledger.Conway.Governance
+import qualified Cardano.Ledger.Conway.Governance as Shelley
+import qualified Cardano.Ledger.Conway.PParams as Shelley
+import Cardano.Ledger.DRepDistr
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.ByteString.Short as SBS
@@ -95,7 +100,7 @@ import Ouroboros.Consensus.Block (
  )
 import Ouroboros.Consensus.Block.Abstract (ConvertRawHash (..))
 import Ouroboros.Consensus.BlockchainTime.WallClock.Types (SystemStart (..))
-import Ouroboros.Consensus.Cardano.Block (LedgerState (..), StandardCrypto)
+import Ouroboros.Consensus.Cardano.Block (LedgerState (..), StandardConway, StandardCrypto)
 import Ouroboros.Consensus.Cardano.CanHardFork ()
 import Ouroboros.Consensus.Config (TopLevelConfig (..), configCodec, configLedger)
 import Ouroboros.Consensus.HardFork.Abstract
@@ -229,6 +234,7 @@ applyBlock env blk = do
     let !appResult =
           ApplyResult
             { apPrices = getPrices newState
+            , apGovExpiresAfter = getGovExpiration newState
             , apPoolsRegistered = getRegisteredPools oldState
             , apNewEpoch = maybeToStrict newEpoch
             , apOldLedger = Strict.Just oldState
@@ -258,6 +264,8 @@ applyBlock env blk = do
                     , Generic.neIsEBB = isJust $ blockIsEBB blk
                     , Generic.neAdaPots = maybeToStrict mPots
                     , Generic.neEpochUpdate = Generic.epochUpdate newState
+                    , Generic.neDRepDistr = maybeToStrict $ getDrepDistr newState
+                    , Generic.neEnacted = maybeToStrict $ getEnacted newState
                     }
 
     applyToEpochBlockNo :: Bool -> Bool -> EpochBlockNo -> EpochBlockNo
@@ -266,6 +274,18 @@ applyBlock env blk = do
     applyToEpochBlockNo _ _ (EpochBlockNo n) = EpochBlockNo (n + 1)
     applyToEpochBlockNo _ _ GenesisEpochBlockNo = EpochBlockNo 0
     applyToEpochBlockNo _ _ EBBEpochBlockNo = EpochBlockNo 0
+
+getDrepDistr :: ExtLedgerState CardanoBlock -> Maybe (DRepDistr StandardCrypto)
+getDrepDistr ls = case ledgerState ls of
+  LedgerStateConway cls ->
+    Just $ Consensus.shelleyLedgerState cls ^. Shelley.newEpochStateDRepDistrL
+  _ -> Nothing
+
+getEnacted :: ExtLedgerState CardanoBlock -> Maybe (EnactState StandardConway)
+getEnacted ls = case ledgerState ls of
+  LedgerStateConway cls ->
+    Just $ Consensus.shelleyLedgerState cls ^. (Shelley.nesEsL . Shelley.esLStateL . Shelley.lsUTxOStateL . Shelley.utxosGovStateL . cgEnactStateL)
+  _ -> Nothing
 
 getStakeSlice :: HasLedgerEnv -> CardanoLedgerState -> Bool -> Generic.StakeSliceRes
 getStakeSlice env cls isMigration =
@@ -796,6 +816,20 @@ getPrices st = case ledgerState $ clsState st of
           ^. Shelley.curPParamsEpochStateL
           . Alonzo.ppPricesL
       )
+  LedgerStateConway bls ->
+    Strict.Just
+      ( Shelley.nesEs (Consensus.shelleyLedgerState bls)
+          ^. Shelley.curPParamsEpochStateL
+          . Alonzo.ppPricesL
+      )
+  _ -> Strict.Nothing
+
+getGovExpiration :: CardanoLedgerState -> Strict.Maybe EpochNo
+getGovExpiration st = case ledgerState $ clsState st of
+  LedgerStateConway bls ->
+    Strict.Just $
+      Shelley.nesEs (Consensus.shelleyLedgerState bls)
+        ^. (Shelley.curPParamsEpochStateL . Shelley.ppGovActionLifetimeL)
   _ -> Strict.Nothing
 
 findAdaPots :: [LedgerEvent] -> Maybe AdaPots
