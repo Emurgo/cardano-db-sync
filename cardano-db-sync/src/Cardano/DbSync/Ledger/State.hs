@@ -76,7 +76,6 @@ import Cardano.Ledger.Conway.Core as Shelley
 import Cardano.Ledger.Conway.Governance
 import qualified Cardano.Ledger.Conway.Governance as Shelley
 import qualified Cardano.Ledger.Conway.PParams as Shelley
-import Cardano.Ledger.DRepDistr
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.ByteString.Short as SBS
@@ -264,7 +263,7 @@ applyBlock env blk = do
                     , Generic.neIsEBB = isJust $ blockIsEBB blk
                     , Generic.neAdaPots = maybeToStrict mPots
                     , Generic.neEpochUpdate = Generic.epochUpdate newState
-                    , Generic.neDRepDistr = maybeToStrict $ getDrepDistr newState
+                    , Generic.neDRepState = maybeToStrict $ getDrepDistr newState
                     , Generic.neEnacted = maybeToStrict $ getEnacted newState
                     }
 
@@ -275,10 +274,10 @@ applyBlock env blk = do
     applyToEpochBlockNo _ _ GenesisEpochBlockNo = EpochBlockNo 0
     applyToEpochBlockNo _ _ EBBEpochBlockNo = EpochBlockNo 0
 
-getDrepDistr :: ExtLedgerState CardanoBlock -> Maybe (DRepDistr StandardCrypto)
+getDrepDistr :: ExtLedgerState CardanoBlock -> Maybe (DRepPulsingState StandardConway)
 getDrepDistr ls = case ledgerState ls of
   LedgerStateConway cls ->
-    Just $ Consensus.shelleyLedgerState cls ^. Shelley.newEpochStateDRepDistrL
+    Just $ Consensus.shelleyLedgerState cls ^. Shelley.newEpochStateDRepPulsingStateL
   _ -> Nothing
 
 getEnacted :: ExtLedgerState CardanoBlock -> Maybe (EnactState StandardConway)
