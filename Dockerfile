@@ -42,6 +42,7 @@ RUN wget https://downloads.haskell.org/ghc/8.10.7/ghc-8.10.7-x86_64-deb9-linux.t
     && make install \
     && cd / \
     && rm -rf /ghc-8.10.7
+RUN git clone https://github.com/supranational/blst && cd blst && git checkout v0.3.10 && ./build.sh && echo cHJlZml4PS91c3IKZXhlY19wcmVmaXg9JHtwcmVmaXh9CmxpYmRpcj0ke2V4ZWNfcHJlZml4fS9saWIKaW5jbHVkZWRpcj0ke3ByZWZpeH0vaW5jbHVkZQoKTmFtZTogbGliYmxzdApEZXNjcmlwdGlvbjogTXVsdGlsaW5ndWFsIEJMUzEyLTM4MSBzaWduYXR1cmUgbGlicmFyeQpVUkw6IGh0dHBzOi8vZ2l0aHViLmNvbS9zdXByYW5hdGlvbmFsL2Jsc3QKVmVyc2lvbjogMC4zLjEwCkNmbGFnczogLUkke2luY2x1ZGVkaXJ9CkxpYnM6IC1MJHtsaWJkaXJ9IC1sYmxzdA== | base64 --decode >> libblst.pc && cp libblst.pc /usr/lib/pkgconfig/ && cp bindings/blst_aux.h bindings/blst.h bindings/blst.hpp  /usr/include/ && cp libblst.a /usr/lib && chmod u=rw,go=r /usr/lib/libblst.a && chmod u=rw,go=r /usr/lib/pkgconfig/libblst.pc && chmod u=rw,go=r /usr/include/blst.h && chmod u=rw,go=r /usr/include/blst.hpp && chmod u=rw,go=r /usr/include/blst_aux.h
 RUN groupadd -g 1001 cardano
 RUN useradd -rm -d /home/cardano -s /bin/bash -g 1001 -G sudo -u 1001 cardano
 RUN mkdir /home/cardano/cdbsync
@@ -67,6 +68,7 @@ RUN ldconfig
 COPY --from=build /root/.local/bin/ /bin/
 COPY --from=build /usr/local/lib/ /lib/
 RUN apt-get update && apt-get install git postgresql libpq-dev libghc-postgresql-libpq-dev -y
+RUN git clone https://github.com/supranational/blst && cd blst && git checkout v0.3.10 && ./build.sh && echo cHJlZml4PS91c3IKZXhlY19wcmVmaXg9JHtwcmVmaXh9CmxpYmRpcj0ke2V4ZWNfcHJlZml4fS9saWIKaW5jbHVkZWRpcj0ke3ByZWZpeH0vaW5jbHVkZQoKTmFtZTogbGliYmxzdApEZXNjcmlwdGlvbjogTXVsdGlsaW5ndWFsIEJMUzEyLTM4MSBzaWduYXR1cmUgbGlicmFyeQpVUkw6IGh0dHBzOi8vZ2l0aHViLmNvbS9zdXByYW5hdGlvbmFsL2Jsc3QKVmVyc2lvbjogMC4zLjEwCkNmbGFnczogLUkke2luY2x1ZGVkaXJ9CkxpYnM6IC1MJHtsaWJkaXJ9IC1sYmxzdA== | base64 --decode >> libblst.pc && cp libblst.pc /usr/lib/pkgconfig/ && cp bindings/blst_aux.h bindings/blst.h bindings/blst.hpp  /usr/include/ && cp libblst.a /usr/lib && chmod u=rw,go=r /usr/lib/libblst.a && chmod u=rw,go=r /usr/lib/pkgconfig/libblst.pc && chmod u=rw,go=r /usr/include/blst.h && chmod u=rw,go=r /usr/include/blst.hpp && chmod u=rw,go=r /usr/include/blst_aux.h
 ARG VERSION
 RUN mkdir /home/cardano
 RUN cd /home/cardano  \
