@@ -19,14 +19,17 @@ module Cardano.DbSync.Api (
   getIsSyncFixed,
   setIsFixed,
   setIsFixedAndMigrate,
+  getBootstrapState,
   getRanIndexes,
   runIndexMigrations,
+  initPruneConsumeMigration,
   runExtraMigrationsMaybe,
   getSafeBlockNoDiff,
   getPruneInterval,
   whenConsumeOrPruneTxOut,
   whenPruneTxOut,
   getHasConsumedOrPruneTxOut,
+  getSkipTxIn,
   getPrunes,
   mkSyncEnvFromConfig,
   verifySnapshotPoint,
@@ -81,7 +84,6 @@ import Control.Concurrent.Class.MonadSTM.Strict (
 import Control.Monad.Trans.Maybe (MaybeT (..))
 import qualified Data.Strict.Maybe as Strict
 import Data.Time.Clock (getCurrentTime)
-import Database.Persist.Postgresql (ConnectionString)
 import Database.Persist.Sql (SqlBackend)
 import Ouroboros.Consensus.Block.Abstract (BlockProtocol, HeaderHash, Point (..), fromRawHash)
 import Ouroboros.Consensus.BlockchainTime.WallClock.Types (SystemStart (..))
@@ -129,6 +131,9 @@ setIsFixedAndMigrate env fr = do
   envRunDelayedMigration env DB.Fix
   atomically $ writeTVar (envIsFixed env) fr
 
+getBootstrapState :: SyncEnv -> IO Bool
+getBootstrapState = readTVarIO . envBootstrap
+
 getRanIndexes :: SyncEnv -> IO Bool
 getRanIndexes env = do
   readTVarIO $ envIndexes env
@@ -141,16 +146,20 @@ runIndexMigrations env = do
     logInfo (getTrace env) "Indexes were created"
     atomically $ writeTVar (envIndexes env) True
 
-initPruneConsumeMigration :: Bool -> Bool -> DB.PruneConsumeMigration
-initPruneConsumeMigration consumed pruneTxOut =
+initPruneConsumeMigration :: Bool -> Bool -> Bool -> Bool -> DB.PruneConsumeMigration
+initPruneConsumeMigration consumed pruneTxOut bootstrap forceTxIn =
   DB.PruneConsumeMigration
-    { DB.pcmPruneTxOut = pruneTxOut
-    , DB.pcmConsumeOrPruneTxOut = consumed || pruneTxOut
+    { DB.pcmPruneTxOut = pruneTxOut || bootstrap
+    , DB.pcmConsumeOrPruneTxOut = consumed || pruneTxOut || bootstrap
+    , DB.pcmSkipTxIn = not forceTxIn && (consumed || pruneTxOut || bootstrap)
     }
+
+getPruneConsume :: SyncEnv -> DB.PruneConsumeMigration
+getPruneConsume = soptPruneConsumeMigration . envOptions
 
 runExtraMigrationsMaybe :: SyncEnv -> IO ()
 runExtraMigrationsMaybe syncEnv = do
-  let pcm = envPruneConsumeMigration syncEnv
+  let pcm = getPruneConsume syncEnv
   logInfo (getTrace syncEnv) $ textShow pcm
   DB.runDbIohkNoLogging (envBackend syncEnv) $
     DB.runExtraMigrations
@@ -165,24 +174,24 @@ getPruneInterval :: SyncEnv -> Word64
 getPruneInterval syncEnv = 10 * getSecurityParam syncEnv
 
 whenConsumeOrPruneTxOut :: (MonadIO m) => SyncEnv -> m () -> m ()
-whenConsumeOrPruneTxOut env action = do
-  let extraMigr = envPruneConsumeMigration env
-  when (DB.pcmConsumeOrPruneTxOut extraMigr) action
+whenConsumeOrPruneTxOut env =
+  when (DB.pcmConsumeOrPruneTxOut $ getPruneConsume env)
 
 whenPruneTxOut :: (MonadIO m) => SyncEnv -> m () -> m ()
-whenPruneTxOut env action = do
-  let extraMigr = envPruneConsumeMigration env
-  when (DB.pcmPruneTxOut extraMigr) action
+whenPruneTxOut env =
+  when (DB.pcmPruneTxOut $ getPruneConsume env)
 
 getHasConsumedOrPruneTxOut :: SyncEnv -> Bool
-getHasConsumedOrPruneTxOut env = do
-  let extraMigr = envPruneConsumeMigration env
-  DB.pcmConsumeOrPruneTxOut extraMigr
+getHasConsumedOrPruneTxOut =
+  DB.pcmConsumeOrPruneTxOut . getPruneConsume
+
+getSkipTxIn :: SyncEnv -> Bool
+getSkipTxIn =
+  DB.pcmSkipTxIn . getPruneConsume
 
 getPrunes :: SyncEnv -> Bool
-getPrunes env = do
-  let extraMigr = envPruneConsumeMigration env
-  DB.pcmPruneTxOut extraMigr
+getPrunes = do
+  DB.pcmPruneTxOut . getPruneConsume
 
 fullInsertOptions :: InsertOptions
 fullInsertOptions = InsertOptions True True True True
@@ -302,7 +311,6 @@ getCurrentTipBlockNo env = do
 
 mkSyncEnv ::
   Trace IO Text ->
-  ConnectionString ->
   SqlBackend ->
   SyncOptions ->
   ProtocolInfo CardanoBlock ->
@@ -313,13 +321,14 @@ mkSyncEnv ::
   Bool ->
   RunMigration ->
   IO SyncEnv
-mkSyncEnv trce connString backend syncOptions protoInfo nw nwMagic systemStart syncNP ranMigrations runMigrationFnc = do
+mkSyncEnv trce backend syncOptions protoInfo nw nwMagic systemStart syncNP ranMigrations runMigrationFnc = do
   dbCNamesVar <- newTVarIO =<< dbConstraintNamesExists backend
   cache <- if soptCache syncOptions then newEmptyCache 250000 50000 else pure uninitiatedCache
   consistentLevelVar <- newTVarIO Unchecked
   fixDataVar <- newTVarIO $ if ranMigrations then DataFixRan else NoneFixRan
   indexesVar <- newTVarIO $ enpForceIndexes syncNP
-  let pcm = initPruneConsumeMigration (enpMigrateConsumed syncNP) (enpPruneTxOut syncNP)
+  bts <- getBootstrapInProgress trce (enpBootstrap syncNP) backend
+  bootstrapVar <- newTVarIO bts
   owq <- newTBQueueIO 100
   orq <- newTBQueueIO 100
   epochVar <- newTVarIO initEpochState
@@ -348,27 +357,24 @@ mkSyncEnv trce connString backend syncOptions protoInfo nw nwMagic systemStart s
     SyncEnv
       { envBackend = backend
       , envCache = cache
-      , envConnString = connString
       , envConsistentLevel = consistentLevelVar
       , envDbConstraints = dbCNamesVar
       , envEpochState = epochVar
       , envEpochSyncTime = epochSyncTime
       , envIndexes = indexesVar
       , envIsFixed = fixDataVar
+      , envBootstrap = bootstrapVar
       , envLedgerEnv = ledgerEnvType
       , envNetworkMagic = nwMagic
       , envOffChainPoolResultQueue = orq
       , envOffChainPoolWorkQueue = owq
       , envOptions = syncOptions
-      , envProtocol = SyncProtocolCardano
-      , envPruneConsumeMigration = pcm
       , envRunDelayedMigration = runMigrationFnc
       , envSystemStart = systemStart
       }
 
 mkSyncEnvFromConfig ::
   Trace IO Text ->
-  ConnectionString ->
   SqlBackend ->
   SyncOptions ->
   GenesisConfig ->
@@ -378,7 +384,7 @@ mkSyncEnvFromConfig ::
   -- | run migration function
   RunMigration ->
   IO (Either SyncNodeError SyncEnv)
-mkSyncEnvFromConfig trce connString backend syncOptions genCfg syncNodeParams ranMigration runMigrationFnc =
+mkSyncEnvFromConfig trce backend syncOptions genCfg syncNodeParams ranMigration runMigrationFnc =
   case genCfg of
     GenesisCardano _ bCfg sCfg _ _
       | unProtocolMagicId (Byron.configProtocolMagicId bCfg) /= Shelley.sgNetworkMagic (scConfig sCfg) ->
@@ -405,7 +411,6 @@ mkSyncEnvFromConfig trce connString backend syncOptions genCfg syncNodeParams ra
           Right
             <$> mkSyncEnv
               trce
-              connString
               backend
               syncOptions
               (fst $ mkProtocolInfoCardano genCfg [])
@@ -473,3 +478,46 @@ getMaxRollbacks ::
   ProtocolInfo blk ->
   Word64
 getMaxRollbacks = maxRollbacks . configSecurityParam . pInfoConfig
+
+getBootstrapInProgress ::
+  Trace IO Text ->
+  Bool ->
+  SqlBackend ->
+  IO Bool
+getBootstrapInProgress trce bootstrapFlag sqlBackend = do
+  DB.runDbIohkNoLogging sqlBackend $ do
+    ems <- DB.queryAllExtraMigrations
+    let btsState = DB.bootstrapState ems
+    case (bootstrapFlag, btsState) of
+      (False, DB.BootstrapNotStarted) ->
+        pure False
+      (False, DB.BootstrapDone) ->
+        -- Bootsrap was previously finalised so it's not needed.
+        pure False
+      (False, DB.BootstrapInProgress) -> do
+        liftIO $ DB.logAndThrowIO trce "Bootstrap flag not set, but still in progress"
+      (True, DB.BootstrapNotStarted) -> do
+        liftIO $
+          logInfo trce $
+            mconcat
+              [ "Syncing with bootstrap. "
+              , "This won't populate tx_out until the tip of the chain."
+              ]
+        DB.insertExtraMigration DB.BootstrapStarted
+        pure True
+      (True, DB.BootstrapInProgress) -> do
+        liftIO $
+          logInfo trce $
+            mconcat
+              [ "Syncing with bootstrap is in progress. "
+              , "This won't populate tx_out until the tip of the chain."
+              ]
+        pure True
+      (True, DB.BootstrapDone) -> do
+        liftIO $
+          logWarning trce $
+            mconcat
+              [ "Bootstrap flag is set, but it will be ignored, "
+              , "since bootstrap is already done."
+              ]
+        pure False

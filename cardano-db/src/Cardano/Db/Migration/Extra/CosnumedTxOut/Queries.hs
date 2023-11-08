@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
@@ -19,7 +20,6 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Control.Monad.Trans.Reader (ReaderT)
 import Data.Text (Text)
-import qualified Data.Text as Text
 import Data.Word (Word64)
 
 -- import Database.Esqueleto.Experimental hiding (update, (<=.), (=.), (==.))
@@ -33,12 +33,18 @@ import Database.PostgreSQL.Simple (SqlError)
 pageSize :: Word64
 pageSize = 100_000
 
+data ConsumedTriplet = ConsumedTriplet
+  { ctTxOutTxId :: TxId -- The txId of the txOut
+  , ctTxOutIndex :: Word64 -- Tx index of the txOut
+  , ctTxInTxId :: TxId -- The txId of the txId
+  }
+
 --------------------------------------------------------------------------------------------------
 -- Queries
 --------------------------------------------------------------------------------------------------
-queryUpdateListTxOutConsumedByTxInId :: MonadIO m => [(TxOutId, TxInId)] -> ReaderT SqlBackend m ()
-queryUpdateListTxOutConsumedByTxInId ls = do
-  mapM_ (uncurry updateTxOutConsumedByTxInId) ls
+queryUpdateListTxOutConsumedByTxId :: MonadIO m => [(TxOutId, TxId)] -> ReaderT SqlBackend m ()
+queryUpdateListTxOutConsumedByTxId ls = do
+  mapM_ (uncurry updateTxOutConsumedByTxId) ls
 
 queryTxConsumedColumnExists :: MonadIO m => ReaderT SqlBackend m Bool
 queryTxConsumedColumnExists = do
@@ -47,18 +53,18 @@ queryTxConsumedColumnExists = do
       <$> rawSql
         ( mconcat
             [ "SELECT column_name FROM information_schema.columns "
-            , "WHERE table_name='tx_out' and column_name='consumed_by_tx_in_id'"
+            , "WHERE table_name='tx_out' and column_name='consumed_by_tx_id'"
             ]
         )
         []
   pure (not $ null columntExists)
 
--- | This is a count of the null consumed_by_tx_in_id
+-- | This is a count of the null consumed_by_tx_id
 queryTxOutConsumedNullCount :: MonadIO m => ReaderT SqlBackend m Word64
 queryTxOutConsumedNullCount = do
   res <- select $ do
     txOut <- from $ table @TxOut
-    where_ (isNothing $ txOut ^. TxOutConsumedByTxInId)
+    where_ (isNothing $ txOut ^. TxOutConsumedByTxId)
     pure countRows
   pure $ maybe 0 unValue (listToMaybe res)
 
@@ -66,26 +72,17 @@ queryTxOutConsumedCount :: MonadIO m => ReaderT SqlBackend m Word64
 queryTxOutConsumedCount = do
   res <- select $ do
     txOut <- from $ table @TxOut
-    where_ (not_ $ isNothing $ txOut ^. TxOutConsumedByTxInId)
+    where_ (not_ $ isNothing $ txOut ^. TxOutConsumedByTxId)
     pure countRows
   pure $ maybe 0 unValue (listToMaybe res)
 
-querySetNullTxOut :: MonadIO m => Trace IO Text -> Maybe TxInId -> Word64 -> ReaderT SqlBackend m ()
-querySetNullTxOut trce mMinTxInId txInDeleted = do
-  whenJust mMinTxInId $ \txInId -> do
-    txOutIds <- getTxOutConsumedAfter txInId
-    mapM_ setNullTxOutConsumedAfterTxInId txOutIds
-    let updatedEntries = fromIntegral (length txOutIds)
-    when (updatedEntries /= txInDeleted) $
-      liftIO $
-        logError trce $
-          Text.concat
-            [ "Deleted "
-            , textShow txInDeleted
-            , " inputs, but set to null only "
-            , textShow updatedEntries
-            , "consumed outputs. Please file an issue at https://github.com/input-output-hk/cardano-db-sync/issues"
-            ]
+querySetNullTxOut :: MonadIO m => Trace IO Text -> Maybe TxId -> ReaderT SqlBackend m ()
+querySetNullTxOut trce mMinTxId = do
+  whenJust mMinTxId $ \txId -> do
+    txOutIds <- getTxOutConsumedAfter txId
+    mapM_ setNullTxOutConsumedAfter txOutIds
+    let updatedEntries = length txOutIds
+    liftIO $ logInfo trce $ "Set to null " <> textShow updatedEntries <> " tx_out.consumed_by_tx_id"
 
 createConsumedTxOut ::
   forall m.
@@ -96,11 +93,11 @@ createConsumedTxOut ::
 createConsumedTxOut = do
   handle exceptHandler $
     rawExecute
-      "ALTER TABLE tx_out ADD COLUMN consumed_by_tx_in_id INT8 NULL"
+      "ALTER TABLE tx_out ADD COLUMN consumed_by_tx_id INT8 NULL"
       []
   handle exceptHandler $
     rawExecute
-      "CREATE INDEX IF NOT EXISTS idx_tx_out_consumed_by_tx_in_id ON tx_out (consumed_by_tx_in_id)"
+      "CREATE INDEX IF NOT EXISTS idx_tx_out_consumed_by_tx_id ON tx_out (consumed_by_tx_id)"
       []
   handle exceptHandler $
     rawExecute
@@ -158,23 +155,23 @@ insertManyTxOutExtra = insertMany' "TxOut"
 --------------------------------------------------------------------------------------------------
 -- Updates
 --------------------------------------------------------------------------------------------------
-updateTxOutConsumedByTxInId :: MonadIO m => TxOutId -> TxInId -> ReaderT SqlBackend m ()
-updateTxOutConsumedByTxInId txOutId txInId =
-  update txOutId [TxOutConsumedByTxInId =. Just txInId]
+updateTxOutConsumedByTxId :: MonadIO m => TxOutId -> TxId -> ReaderT SqlBackend m ()
+updateTxOutConsumedByTxId txOutId txId =
+  update txOutId [TxOutConsumedByTxId =. Just txId]
 
--- | This requires an index at TxOutConsumedByTxInId.
-getTxOutConsumedAfter :: MonadIO m => TxInId -> ReaderT SqlBackend m [TxOutId]
-getTxOutConsumedAfter txInId = do
+-- | This requires an index at TxOutConsumedByTxId.
+getTxOutConsumedAfter :: MonadIO m => TxId -> ReaderT SqlBackend m [TxOutId]
+getTxOutConsumedAfter txId = do
   res <- select $ do
     txOut <- from $ table @TxOut
-    where_ (txOut ^. TxOutConsumedByTxInId >=. just (val txInId))
+    where_ (txOut ^. TxOutConsumedByTxId >=. just (val txId))
     pure $ txOut ^. persistIdField
   pure $ unValue <$> res
 
--- | This requires an index at TxOutConsumedByTxInId.
-setNullTxOutConsumedAfterTxInId :: MonadIO m => TxOutId -> ReaderT SqlBackend m ()
-setNullTxOutConsumedAfterTxInId txOutId = do
-  update txOutId [TxOutConsumedByTxInId =. Nothing]
+-- | This requires an index at TxOutConsumedByTxId.
+setNullTxOutConsumedAfter :: MonadIO m => TxOutId -> ReaderT SqlBackend m ()
+setNullTxOutConsumedAfter txOutId = do
+  update txOutId [TxOutConsumedByTxId =. Nothing]
 
 migrateTxOut ::
   ( MonadBaseControl IO m
@@ -191,19 +188,16 @@ migrateTxOut mTrace = do
       whenJust mTrace $ \trce ->
         liftIO $ logInfo trce $ "Handling input offset " <> textShow offst
       page <- getInputPage offst pageSize
-      mapM_ migratePair page
+      updatePageEntries page
       when (fromIntegral (length page) == pageSize) $
         migrateNextPage $!
           offst
             + pageSize
 
-migratePair :: MonadIO m => (TxInId, TxId, Word64) -> ReaderT SqlBackend m ()
-migratePair (txInId, txId, index) =
-  updateTxOutConsumedByTxInIdUnique txId index txInId
-
 --------------------------------------------------------------------------------------------------
 -- Delete + Update
 --------------------------------------------------------------------------------------------------
+
 deleteAndUpdateConsumedTxOut ::
   forall m.
   (MonadIO m, MonadBaseControl IO m) =>
@@ -211,21 +205,21 @@ deleteAndUpdateConsumedTxOut ::
   Word64 ->
   ReaderT SqlBackend m ()
 deleteAndUpdateConsumedTxOut trce blockNoDiff = do
-  maxTxInId <- findMaxTxInId blockNoDiff
-  case maxTxInId of
+  maxTxId <- findMaxTxInId blockNoDiff
+  case maxTxId of
     Left errMsg -> do
       liftIO $ logInfo trce $ "No tx_out were deleted as no blocks found: " <> errMsg
       liftIO $ logInfo trce "Now Running extra migration prune tx_out"
       migrateTxOut (Just trce)
-    Right mTxIdIn -> do
-      migrateNextPage mTxIdIn False 0
+    Right mTxId -> do
+      migrateNextPage mTxId False 0
   where
-    migrateNextPage :: TxInId -> Bool -> Word64 -> ReaderT SqlBackend m ()
-    migrateNextPage maxTxInId ranCreateConsumedTxOut offst = do
+    migrateNextPage :: TxId -> Bool -> Word64 -> ReaderT SqlBackend m ()
+    migrateNextPage maxTxId ranCreateConsumedTxOut offst = do
       pageEntries <- getInputPage offst pageSize
-      resPageEntries <- splitAndProcessPageEntries trce ranCreateConsumedTxOut maxTxInId pageEntries
+      resPageEntries <- splitAndProcessPageEntries trce ranCreateConsumedTxOut maxTxId pageEntries
       when (fromIntegral (length pageEntries) == pageSize) $
-        migrateNextPage maxTxInId resPageEntries $!
+        migrateNextPage maxTxId resPageEntries $!
           offst
             + pageSize
 
@@ -235,14 +229,15 @@ splitAndProcessPageEntries ::
   (MonadIO m, MonadBaseControl IO m) =>
   Trace IO Text ->
   Bool ->
-  TxInId ->
-  [(TxInId, TxId, Word64)] ->
+  TxId ->
+  [ConsumedTriplet] ->
   ReaderT SqlBackend m Bool
-splitAndProcessPageEntries trce ranCreateConsumedTxOut maxTxInId pageEntries = do
-  let entriesSplit = span (\(txInId, _, _) -> txInId <= maxTxInId) pageEntries
+splitAndProcessPageEntries trce ranCreateConsumedTxOut maxTxId pageEntries = do
+  let entriesSplit = span (\tr -> ctTxInTxId tr <= maxTxId) pageEntries
   case entriesSplit of
-    -- empty lists just return
-    ([], []) -> pure True
+    ([], []) -> do
+      shouldCreateConsumedTxOut trce ranCreateConsumedTxOut
+      pure True
     -- the whole list is less that maxTxInId
     (xs, []) -> do
       deletePageEntries xs
@@ -262,21 +257,22 @@ splitAndProcessPageEntries trce ranCreateConsumedTxOut maxTxInId pageEntries = d
 -- | Update
 updatePageEntries ::
   MonadIO m =>
-  [(TxInId, TxId, Word64)] ->
+  [ConsumedTriplet] ->
   ReaderT SqlBackend m ()
-updatePageEntries = mapM_ (\(txInId, txId, index) -> updateTxOutConsumedByTxInIdUnique txId index txInId)
+updatePageEntries =
+  mapM_ updateTxOutConsumedByTxIdUnique
 
-updateTxOutConsumedByTxInIdUnique :: MonadIO m => TxId -> Word64 -> TxInId -> ReaderT SqlBackend m ()
-updateTxOutConsumedByTxInIdUnique txOutId index txInId =
-  updateWhere [TxOutTxId ==. txOutId, TxOutIndex ==. index] [TxOutConsumedByTxInId =. Just txInId]
+updateTxOutConsumedByTxIdUnique :: MonadIO m => ConsumedTriplet -> ReaderT SqlBackend m ()
+updateTxOutConsumedByTxIdUnique ConsumedTriplet {ctTxOutTxId, ctTxOutIndex, ctTxInTxId} =
+  updateWhere [TxOutTxId ==. ctTxOutTxId, TxOutIndex ==. ctTxOutIndex] [TxOutConsumedByTxId =. Just ctTxInTxId]
 
 -- | Delete
 -- this builds up a single delete query using the pageEntries list
 deletePageEntries ::
   MonadIO m =>
-  [(TxInId, TxId, Word64)] ->
+  [ConsumedTriplet] ->
   ReaderT SqlBackend m ()
-deletePageEntries = mapM_ (\(_, txId, index) -> deleteTxOutConsumed txId index)
+deletePageEntries = mapM_ (\ConsumedTriplet {ctTxOutTxId, ctTxOutIndex} -> deleteTxOutConsumed ctTxOutTxId ctTxOutIndex)
 
 deleteTxOutConsumed :: MonadIO m => TxId -> Word64 -> ReaderT SqlBackend m ()
 deleteTxOutConsumed txOutId index =
@@ -305,22 +301,22 @@ deleteConsumedTxOut trce blockNoDiff = do
   maxTxInId <- findMaxTxInId blockNoDiff
   case maxTxInId of
     Left errMsg -> liftIO $ logInfo trce $ "No tx_out was deleted: " <> errMsg
-    Right mxtid -> deleteConsumedBeforeTxIn trce mxtid
+    Right mxtid -> deleteConsumedBeforeTx trce mxtid
 
-deleteConsumedBeforeTxIn :: MonadIO m => Trace IO Text -> TxInId -> ReaderT SqlBackend m ()
-deleteConsumedBeforeTxIn trce txInId = do
-  countDeleted <- deleteWhereCount [TxOutConsumedByTxInId <=. Just txInId]
+deleteConsumedBeforeTx :: MonadIO m => Trace IO Text -> TxId -> ReaderT SqlBackend m ()
+deleteConsumedBeforeTx trce txId = do
+  countDeleted <- deleteWhereCount [TxOutConsumedByTxId <=. Just txId]
   liftIO $ logInfo trce $ "Deleted " <> textShow countDeleted <> " tx_out"
 
 --------------------------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------------------------
-findMaxTxInId :: forall m. MonadIO m => Word64 -> ReaderT SqlBackend m (Either Text TxInId)
+findMaxTxInId :: forall m. MonadIO m => Word64 -> ReaderT SqlBackend m (Either Text TxId)
 findMaxTxInId blockNoDiff = do
   mBlockHeight <- queryBlockHeight
   maybe (pure $ Left "No blocks found") findConsumed mBlockHeight
   where
-    findConsumed :: Word64 -> ReaderT SqlBackend m (Either Text TxInId)
+    findConsumed :: Word64 -> ReaderT SqlBackend m (Either Text TxId)
     findConsumed tipBlockNo = do
       if tipBlockNo <= blockNoDiff
         then pure $ Left $ "Tip blockNo is " <> textShow tipBlockNo
@@ -331,14 +327,12 @@ findMaxTxInId blockNoDiff = do
             findConsumedBeforeBlock
             mBlockId
 
-    findConsumedBeforeBlock :: BlockId -> ReaderT SqlBackend m (Either Text TxInId)
+    findConsumedBeforeBlock :: BlockId -> ReaderT SqlBackend m (Either Text TxId)
     findConsumedBeforeBlock blockId = do
       mTxId <- queryMaxRefId TxBlockId blockId False
       case mTxId of
         Nothing -> pure $ Left $ "No txs found before " <> textShow blockId
-        Just txId -> do
-          mTxInId <- queryMaxRefId TxInTxInId txId True
-          pure $ maybe (Left $ "No tx_in found before or at " <> textShow txId) Right mTxInId
+        Just txId -> pure $ Right txId
 
 queryBlockNo :: MonadIO m => Word64 -> ReaderT SqlBackend m (Maybe BlockId)
 queryBlockNo blkNo = do
@@ -348,7 +342,7 @@ queryBlockNo blkNo = do
     pure (blk ^. BlockId)
   pure $ fmap unValue (listToMaybe res)
 
-getInputPage :: MonadIO m => Word64 -> Word64 -> ReaderT SqlBackend m [(TxInId, TxId, Word64)]
+getInputPage :: MonadIO m => Word64 -> Word64 -> ReaderT SqlBackend m [ConsumedTriplet]
 getInputPage offs pgSize = do
   res <- select $ do
     txIn <- from $ table @TxIn
@@ -359,7 +353,11 @@ getInputPage offs pgSize = do
   pure $ convert <$> res
   where
     convert txIn =
-      (entityKey txIn, txInTxOutId (entityVal txIn), txInTxOutIndex (entityVal txIn))
+      ConsumedTriplet
+        { ctTxOutTxId = txInTxOutId (entityVal txIn)
+        , ctTxOutIndex = txInTxOutIndex (entityVal txIn)
+        , ctTxInTxId = txInTxInId (entityVal txIn)
+        }
 
 countTxIn :: MonadIO m => ReaderT SqlBackend m Word64
 countTxIn = do
@@ -372,6 +370,6 @@ countConsumed :: MonadIO m => ReaderT SqlBackend m Word64
 countConsumed = do
   res <- select $ do
     txOut <- from $ table @TxOut
-    where_ (isJust $ txOut ^. TxOutConsumedByTxInId)
+    where_ (isJust $ txOut ^. TxOutConsumedByTxId)
     pure countRows
   pure $ maybe 0 unValue (listToMaybe res)

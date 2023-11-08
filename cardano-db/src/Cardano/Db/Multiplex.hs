@@ -6,7 +6,7 @@
 module Cardano.Db.Multiplex (
   insertTxOutPlex,
   insertManyTxOutPlex,
-  updateListTxOutConsumedByTxInId,
+  updateListTxOutConsumedByTxId,
   setNullTxOut,
   runExtraMigrations,
   ExtraCons.deleteConsumedTxOut,
@@ -21,7 +21,7 @@ import Cardano.Db.Query (queryAllExtraMigrations)
 import Cardano.Db.Schema
 import Cardano.Db.Types (ExtraMigration (..), PruneConsumeMigration (..), wasPruneTxOutPreviouslySet)
 import Control.Exception (throw)
-import Control.Monad (unless)
+import Control.Monad (unless, void)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Control.Monad.Trans.Reader (ReaderT)
@@ -32,18 +32,25 @@ import Database.Persist.Sql (SqlBackend, ToBackendKey (..))
 insertTxOutPlex ::
   (MonadBaseControl IO m, MonadIO m) =>
   Bool ->
+  Bool ->
   TxOut ->
-  ReaderT SqlBackend m TxOutId
-insertTxOutPlex hasConsMigration txOut = do
-  if hasConsMigration
-    then changeKey <$> ExtraCons.insertTxOutExtra (toExtraTxOut txOut)
-    else insertTxOut txOut
+  ReaderT SqlBackend m ()
+insertTxOutPlex hasConsMigration bts txOut = do
+  case (hasConsMigration, bts) of
+    (False, _) ->
+      void $ insertTxOut txOut
+    (True, False) ->
+      void $ ExtraCons.insertTxOutExtra (toExtraTxOut txOut)
+    (True, True) -> pure ()
 
-insertManyTxOutPlex :: (MonadBaseControl IO m, MonadIO m) => Bool -> [TxOut] -> ReaderT SqlBackend m [TxOutId]
-insertManyTxOutPlex hasConsMigration txOuts =
-  if hasConsMigration
-    then fmap changeKey <$> ExtraCons.insertManyTxOutExtra (toExtraTxOut <$> txOuts)
-    else insertManyTxOut txOuts
+insertManyTxOutPlex :: (MonadBaseControl IO m, MonadIO m) => Bool -> Bool -> [TxOut] -> ReaderT SqlBackend m [TxOutId]
+insertManyTxOutPlex hasConsMigration bts txOuts =
+  case (hasConsMigration, bts) of
+    (False, _) ->
+      insertManyTxOut txOuts
+    (True, False) ->
+      fmap changeKey <$> ExtraCons.insertManyTxOutExtra (toExtraTxOut <$> txOuts)
+    (True, True) -> pure []
 
 changeKey ::
   ( ToBackendKey SqlBackend record1
@@ -67,16 +74,16 @@ toExtraTxOut txOut =
     , ExtraCons.txOutDataHash = txOutDataHash txOut
     , ExtraCons.txOutInlineDatumId = changeKey <$> txOutInlineDatumId txOut
     , ExtraCons.txOutReferenceScriptId = changeKey <$> txOutReferenceScriptId txOut
-    , ExtraCons.txOutConsumedByTxInId = Nothing
+    , ExtraCons.txOutConsumedByTxId = Nothing
     }
 
-updateListTxOutConsumedByTxInId :: MonadIO m => [(TxOutId, TxInId)] -> ReaderT SqlBackend m ()
-updateListTxOutConsumedByTxInId ls = do
-  ExtraCons.queryUpdateListTxOutConsumedByTxInId (f <$> ls)
+updateListTxOutConsumedByTxId :: MonadIO m => [(TxOutId, TxId)] -> ReaderT SqlBackend m ()
+updateListTxOutConsumedByTxId ls = do
+  ExtraCons.queryUpdateListTxOutConsumedByTxId (f <$> ls)
   where
     f (txOutId, txInId) = (changeKey txOutId, changeKey txInId)
 
-setNullTxOut :: MonadIO m => Trace IO Text -> Maybe TxInId -> Word64 -> ReaderT SqlBackend m ()
+setNullTxOut :: MonadIO m => Trace IO Text -> Maybe TxId -> ReaderT SqlBackend m ()
 setNullTxOut trce mMinTxInId =
   ExtraCons.querySetNullTxOut trce (changeKey <$> mMinTxInId)
 

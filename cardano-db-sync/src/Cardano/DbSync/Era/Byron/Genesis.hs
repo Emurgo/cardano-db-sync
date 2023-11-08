@@ -44,24 +44,25 @@ insertValidateGenesisDist ::
 insertValidateGenesisDist syncEnv (NetworkName networkName) cfg = do
   -- Setting this to True will log all 'Persistent' operations which is great
   -- for debugging, but otherwise *way* too chatty.
+  bts <- liftIO $ getBootstrapState syncEnv
   let hasConsumed = getHasConsumedOrPruneTxOut syncEnv
       prunes = getPrunes syncEnv
   if False
-    then newExceptT $ DB.runDbIohkLogging (envBackend syncEnv) tracer (insertAction hasConsumed prunes)
-    else newExceptT $ DB.runDbIohkNoLogging (envBackend syncEnv) (insertAction hasConsumed prunes)
+    then newExceptT $ DB.runDbIohkLogging (envBackend syncEnv) tracer (insertAction hasConsumed prunes bts)
+    else newExceptT $ DB.runDbIohkNoLogging (envBackend syncEnv) (insertAction hasConsumed prunes bts)
   where
     tracer = getTrace syncEnv
 
-    insertAction :: Bool -> Bool -> (MonadBaseControl IO m, MonadIO m) => ReaderT SqlBackend m (Either SyncNodeError ())
-    insertAction hasConsumed prunes = do
+    insertAction :: Bool -> Bool -> Bool -> (MonadBaseControl IO m, MonadIO m) => ReaderT SqlBackend m (Either SyncNodeError ())
+    insertAction hasConsumed prunes bootstrap = do
       ebid <- DB.queryBlockId (configGenesisHash cfg)
       case ebid of
-        Right bid -> validateGenesisDistribution prunes tracer networkName cfg bid
+        Right bid -> validateGenesisDistribution prunes bootstrap tracer networkName cfg bid
         Left _ ->
           runExceptT $ do
             liftIO $ logInfo tracer "Inserting Byron Genesis distribution"
             count <- lift DB.queryBlockCount
-            when (count > 0) $
+            when (not bootstrap && count > 0) $
               dbSyncNodeError "insertValidateGenesisDist: Genesis data mismatch."
             void . lift $
               DB.insertMeta $
@@ -104,7 +105,8 @@ insertValidateGenesisDist syncEnv (NetworkName networkName) cfg = do
                   , DB.blockOpCert = Nothing
                   , DB.blockOpCertCounter = Nothing
                   }
-            mapM_ (insertTxOuts hasConsumed bid) $ genesisTxos cfg
+            bts <- liftIO $ getBootstrapState syncEnv
+            mapM_ (insertTxOuts hasConsumed bts bid) $ genesisTxos cfg
             liftIO . logInfo tracer $
               "Initial genesis distribution populated. Hash "
                 <> renderByteArray (configGenesisHash cfg)
@@ -116,12 +118,13 @@ insertValidateGenesisDist syncEnv (NetworkName networkName) cfg = do
 validateGenesisDistribution ::
   (MonadBaseControl IO m, MonadIO m) =>
   Bool ->
+  Bool ->
   Trace IO Text ->
   Text ->
   Byron.Config ->
   DB.BlockId ->
   ReaderT SqlBackend m (Either SyncNodeError ())
-validateGenesisDistribution prunes tracer networkName cfg bid =
+validateGenesisDistribution prunes bts tracer networkName cfg bid =
   runExceptT $ do
     meta <- liftLookupFail "validateGenesisDistribution" DB.queryMeta
 
@@ -153,31 +156,33 @@ validateGenesisDistribution prunes tracer networkName cfg bid =
           , " but got "
           , textShow txCount
           ]
-    totalSupply <- lift DB.queryGenesisSupply
-    case DB.word64ToAda <$> configGenesisSupply cfg of
-      Left err -> dbSyncNodeError $ "validateGenesisDistribution: " <> textShow err
-      Right expectedSupply ->
-        when (expectedSupply /= totalSupply && not prunes) $
-          dbSyncNodeError $
-            Text.concat
-              [ "validateGenesisDistribution: Expected total supply to be "
-              , DB.renderAda expectedSupply
-              , " but got "
-              , DB.renderAda totalSupply
-              ]
-    liftIO $ do
-      logInfo tracer "Initial genesis distribution present and correct"
-      logInfo tracer ("Total genesis supply of Ada: " <> DB.renderAda totalSupply)
+    unless bts $ do
+      totalSupply <- lift DB.queryGenesisSupply
+      case DB.word64ToAda <$> configGenesisSupply cfg of
+        Left err -> dbSyncNodeError $ "validateGenesisDistribution: " <> textShow err
+        Right expectedSupply ->
+          when (expectedSupply /= totalSupply && not prunes) $
+            dbSyncNodeError $
+              Text.concat
+                [ "validateGenesisDistribution: Expected total supply to be "
+                , DB.renderAda expectedSupply
+                , " but got "
+                , DB.renderAda totalSupply
+                ]
+      liftIO $ do
+        logInfo tracer "Initial genesis distribution present and correct"
+        logInfo tracer ("Total genesis supply of Ada: " <> DB.renderAda totalSupply)
 
 -- -----------------------------------------------------------------------------
 
 insertTxOuts ::
   (MonadBaseControl IO m, MonadIO m) =>
   Bool ->
+  Bool ->
   DB.BlockId ->
   (Byron.Address, Byron.Lovelace) ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertTxOuts hasConsumed blkId (address, value) = do
+insertTxOuts hasConsumed bts blkId (address, value) = do
   case txHashOfAddress address of
     Left err -> throwError err
     Right val -> do
@@ -200,21 +205,20 @@ insertTxOuts hasConsumed blkId (address, value) = do
               , DB.txScriptSize = 0
               }
       lift $
-        void $
-          DB.insertTxOutPlex hasConsumed $
-            DB.TxOut
-              { DB.txOutTxId = txId
-              , DB.txOutIndex = 0
-              , DB.txOutAddress = Text.decodeUtf8 $ Byron.addrToBase58 address
-              , DB.txOutAddressRaw = Binary.serialize' address
-              , DB.txOutAddressHasScript = False
-              , DB.txOutPaymentCred = Nothing
-              , DB.txOutStakeAddressId = Nothing
-              , DB.txOutValue = DB.DbLovelace (Byron.unsafeGetLovelace value)
-              , DB.txOutDataHash = Nothing
-              , DB.txOutInlineDatumId = Nothing
-              , DB.txOutReferenceScriptId = Nothing
-              }
+        DB.insertTxOutPlex hasConsumed bts $
+          DB.TxOut
+            { DB.txOutTxId = txId
+            , DB.txOutIndex = 0
+            , DB.txOutAddress = Text.decodeUtf8 $ Byron.addrToBase58 address
+            , DB.txOutAddressRaw = Binary.serialize' address
+            , DB.txOutAddressHasScript = False
+            , DB.txOutPaymentCred = Nothing
+            , DB.txOutStakeAddressId = Nothing
+            , DB.txOutValue = DB.DbLovelace (Byron.unsafeGetLovelace value)
+            , DB.txOutDataHash = Nothing
+            , DB.txOutInlineDatumId = Nothing
+            , DB.txOutReferenceScriptId = Nothing
+            }
 
 -- -----------------------------------------------------------------------------
 

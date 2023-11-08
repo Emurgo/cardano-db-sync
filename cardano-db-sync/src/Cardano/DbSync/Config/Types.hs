@@ -71,10 +71,12 @@ data SyncNodeParams = SyncNodeParams
   , enpHasMetadata :: !Bool
   , enpHasPlutusExtra :: !Bool
   , enpHasOffChainPoolData :: !Bool
+  , enpForceTxIn :: !Bool
   , enpTurboMode :: !Bool
   , enpFullMode :: !Bool
   , enpMigrateConsumed :: !Bool
   , enpPruneTxOut :: !Bool
+  , enpBootstrap :: !Bool
   , enpSnEveryFollowing :: !Word64
   , enpSnEveryLagging :: !Word64
   , enpMaybeRollback :: !(Maybe SlotNo)

@@ -26,8 +26,10 @@ module Cardano.Db.Types (
   Vote (..),
   VoterRole (..),
   GovActionType (..),
+  BootstrapState (..),
   isStakeDistrComplete,
   wasPruneTxOutPreviouslySet,
+  bootstrapState,
   extraDescription,
   deltaCoinToDbInt65,
   integerToDbInt65,
@@ -183,6 +185,8 @@ data PoolCert = PoolCert
 data ExtraMigration
   = StakeDistrEnded
   | PruneTxOutFlagPreviouslySet
+  | BootstrapStarted
+  | BootstrapFinished
   deriving (Eq, Show, Read)
 
 isStakeDistrComplete :: [ExtraMigration] -> Bool
@@ -191,11 +195,24 @@ isStakeDistrComplete = elem StakeDistrEnded
 wasPruneTxOutPreviouslySet :: [ExtraMigration] -> Bool
 wasPruneTxOutPreviouslySet = elem PruneTxOutFlagPreviouslySet
 
+data BootstrapState
+  = BootstrapNotStarted
+  | BootstrapInProgress
+  | BootstrapDone
+
+bootstrapState :: [ExtraMigration] -> BootstrapState
+bootstrapState ls =
+  case (BootstrapStarted `elem` ls, BootstrapFinished `elem` ls) of
+    (False, False) -> BootstrapNotStarted
+    (True, False) -> BootstrapInProgress
+    (_, True) -> BootstrapDone
+
 data PruneConsumeMigration = PruneConsumeMigration
   { pcmPruneTxOut :: Bool
   , -- we make the assumption that if the user is using prune flag
     -- they will also want consume automatically set for them.
     pcmConsumeOrPruneTxOut :: Bool
+  , pcmSkipTxIn :: Bool
   }
   deriving (Show)
 
@@ -206,7 +223,10 @@ extraDescription = \case
     \Also the epoch_stake_progress table is introduced."
   PruneTxOutFlagPreviouslySet ->
     "The --prune-tx-out flag has previously been enabled, now db-sync can't be run without the flag enabled"
-
+  BootstrapStarted ->
+    "The bootstrap syncing is in progress"
+  BootstrapFinished ->
+    "The bootstrap is finalised"
 instance Ord PoolCert where
   compare a b = compare (pcCertNo a) (pcCertNo b)
 

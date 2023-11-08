@@ -86,10 +86,12 @@ pRunDbSyncNode =
     <*> pHasMetadata
     <*> pHasPlutusExtra
     <*> pHasOffChainPoolData
+    <*> pForceTxIn
     <*> pTurboMode
     <*> pFullMode
     <*> pMigrateConsumed
     <*> pPruneTxOut
+    <*> bootstrap
     <*> pure 500
     <*> pure 10000
     <*> optional pSlotNo
@@ -247,6 +249,15 @@ pHasOffChainPoolData =
         <> Opt.help "Disables fetching pool offchain metadata."
     )
 
+pForceTxIn :: Parser Bool
+pForceTxIn =
+  Opt.flag
+    False
+    True
+    ( Opt.long "force-tx-in"
+        <> Opt.help "Force populating the tx_in table even if --consumed-tx-out is enabled"
+    )
+
 pTurboMode :: Parser Bool
 pTurboMode =
   Opt.flag
@@ -287,6 +298,18 @@ pPruneTxOut =
           "Prunes the consumed tx_out periodically. This assumes \
           \ consumed-tx-out is also set, even if it's not. If this is set once,\
           \ then it must be always set on following executions of db-sync."
+    )
+
+bootstrap :: Parser Bool
+bootstrap =
+  Opt.flag
+    False
+    True
+    ( Opt.long "bootstrap-tx-out"
+        <> Opt.help
+          "This syncs without populating the tx_out table. It eventually gets populated\
+          \ by migrating the ledger state. It assumes the --consumed-tx-out and\
+          \ not having the --disable-ledger-state"
     )
 
 pVersionCommand :: Parser SyncCommand

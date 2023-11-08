@@ -36,13 +36,26 @@ order them in the correct order for applying to the database.
 
 ## Creating a Migration
 
-Whenever the Haskell schema definition in `Cardano.Db.Schema` is updated, a schema migration can
-be generated using the command:
+Whenever the Haskell schema definition in `Cardano.Db.Schema` is updated, a schema migration will need to be migrated.
+When migrating, `db-sync` caches some of the schema files when it is built so this can be point of confusion.
+
+Firstly you need to run current existing migrations by:
+```
+export PGPASSFILE=config/pgpass-mainnet
+cabal run cardano-db-tool -- run-migrations --mdir schema/
+```
+
+Next it's time to generated the new migration file by running:
 ```
 export PGPASSFILE=config/pgpass-mainnet
 cabal run cardano-db-tool -- create-migration --mdir schema/
 ```
-which will only generate a migration if one is needed. It is usually best to run the test suite
-(`cabal test cardano-db-sync db` which tests the migrations) first and then generate the migration.
+This will generate a migration if one is needed. 
 
-[Persistent]: https://hackage.haskell.org/package/persistent
+Once this has completed it's good practice to rebuild `cardano-db-sync` due to how it caches schema files when built, this can be done using the following documentation [Build and Install](./installing.md#build-and-install)
+
+**Note:**  For extra reassurance one can run the test suite to check that the new migration hasn't broken any tests:
+```
+cd ./cardano-chain-gen
+cabal run test:cardano-chain-gen
+```
