@@ -51,6 +51,7 @@ library
                         Cardano.Mock.Forging.Tx.Alonzo.ScriptsExamples
                         Cardano.Mock.Forging.Tx.Babbage
                         Cardano.Mock.Forging.Tx.Babbage.Scenarios
+                        Cardano.Mock.Forging.Tx.Conway
                         Cardano.Mock.Forging.Tx.Generic
                         Cardano.Mock.Forging.Tx.Shelley
                         Cardano.Mock.Forging.Types
@@ -64,6 +65,7 @@ library
                       , cardano-ledger-allegra
                       , cardano-ledger-alonzo
                       , cardano-ledger-babbage
+                      , cardano-ledger-conway
                       , cardano-ledger-binary
                       , cardano-ledger-core
                       , cardano-ledger-shelley
@@ -144,7 +146,12 @@ test-suite cardano-chain-gen
                         Test.Cardano.Db.Mock.Unit.Babbage.Stake
                         Test.Cardano.Db.Mock.Unit.Babbage.Tx
                         Test.Cardano.Db.Mock.Unit.Conway
+                        Test.Cardano.Db.Mock.Unit.Conway.CommandLineArg.ConfigFile
+                        Test.Cardano.Db.Mock.Unit.Conway.CommandLineArg.EpochDisabled
+                        Test.Cardano.Db.Mock.Unit.Conway.CommandLineArg.ForceIndex
+                        Test.Cardano.Db.Mock.Unit.Conway.CommandLineArg.MigrateConsumedPruneTxOut
                         Test.Cardano.Db.Mock.Unit.Conway.Config
+                        Test.Cardano.Db.Mock.Unit.Conway.Simple
                         Test.Cardano.Db.Mock.UnifiedApi
                         Test.Cardano.Db.Mock.Validate
 
