@@ -91,6 +91,7 @@ runDbSync ::
   Bool ->
   IO ()
 runDbSync metricsSetters knownMigrations iomgr trce params aop = do
+  logInfo trce $ textShow syncOpts
   -- Read the PG connection info
   pgConfig <- runOrThrowIO (Db.readPGPass $ enpPGPassSource params)
 
@@ -222,7 +223,7 @@ logProtocolMagicId tracer pm =
 extractSyncOptions :: SyncNodeParams -> Bool -> SyncOptions
 extractSyncOptions snp aop =
   SyncOptions
-    { soptEpochAndCacheEnabled = not $ enpEpochDisabled snp && enpHasCache snp
+    { soptEpochAndCacheEnabled = not (enpBootstrap snp) && ioInOut iopts && not (enpEpochDisabled snp && enpHasCache snp)
     , soptAbortOnInvalid = aop
     , soptCache = enpHasCache snp
     , soptSkipFix = enpSkipFix snp
@@ -234,32 +235,23 @@ extractSyncOptions snp aop =
     }
   where
     iopts
+      | enpOnlyGov snp = onlyGovInsertOptions
       | enpFullMode snp = fullInsertOptions
-      | enpTurboMode snp = turboInsertOptions
+      | enpDisableAllMode snp = disableAllInsertOptions
       | otherwise =
           InsertOptions
-            { ioMultiAssets = enpHasMultiAssets snp
+            { ioInOut = enpHasInOut snp
+            , ioShelley = enpHasShelley snp
+            , ioMultiAssets = enpHasMultiAssets snp
             , ioMetadata = enpHasMetadata snp
             , ioPlutusExtra = enpHasPlutusExtra snp
             , ioOffChainPoolData = enpHasOffChainPoolData snp
+            , ioGov = enpHasGov snp
             }
 
 startupReport :: Trace IO Text -> Bool -> SyncNodeParams -> IO ()
 startupReport trce aop params = do
   logInfo trce $ mconcat ["Version number: ", Text.pack (showVersion version)]
   logInfo trce $ mconcat ["Git hash: ", Db.gitRev]
-  logInfo trce $ mconcat ["Option disable-ledger: ", textShow (not $ enpShouldUseLedger params)]
-  logInfo trce $ mconcat ["Option disable-cache: ", textShow (not $ enpHasCache params)]
-  logInfo trce $ mconcat ["Option disable-epoch: ", textShow (enpEpochDisabled params)]
-  logInfo trce $ mconcat ["Option skip-fix: ", textShow (enpSkipFix params)]
-  logInfo trce $ mconcat ["Option fix-only: ", textShow (enpOnlyFix params)]
-  logInfo trce $ mconcat ["Option force-indexes: ", textShow (enpForceIndexes params)]
-  logInfo trce $ mconcat ["Option consumed-tx-out: ", textShow (enpMigrateConsumed params)]
-  logInfo trce $ mconcat ["Option prune-tx-out: ", textShow (enpPruneTxOut params)]
-  logInfo trce $ mconcat ["Option disable-multiassets: ", textShow (not $ enpHasMultiAssets params)]
-  logInfo trce $ mconcat ["Option disable-metadata: ", textShow (not $ enpHasMetadata params)]
-  logInfo trce $ mconcat ["Option disable-plutus-extra: ", textShow (not $ enpHasPlutusExtra params)]
-  logInfo trce $ mconcat ["Option disable-offchain-pool-data: ", textShow (not $ enpHasOffChainPoolData params)]
-  logInfo trce $ mconcat ["Option turbo: ", textShow (enpTurboMode params)]
-  logInfo trce $ mconcat ["Option full: ", textShow (enpFullMode params)]
   logInfo trce $ mconcat ["Enviroment variable DbSyncAbortOnPanic: ", textShow aop]
+  logInfo trce $ textShow params

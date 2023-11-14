@@ -67,13 +67,17 @@ data SyncNodeParams = SyncNodeParams
   , enpSkipFix :: !Bool
   , enpOnlyFix :: !Bool
   , enpForceIndexes :: !Bool
+  , enpHasInOut :: !Bool
+  , enpHasShelley :: !Bool
   , enpHasMultiAssets :: !Bool
   , enpHasMetadata :: !Bool
   , enpHasPlutusExtra :: !Bool
+  , enpHasGov :: !Bool
   , enpHasOffChainPoolData :: !Bool
   , enpForceTxIn :: !Bool
-  , enpTurboMode :: !Bool
+  , enpDisableAllMode :: !Bool
   , enpFullMode :: !Bool
+  , enpOnlyGov :: !Bool
   , enpMigrateConsumed :: !Bool
   , enpPruneTxOut :: !Bool
   , enpBootstrap :: !Bool

@@ -10,7 +10,8 @@
 module Cardano.DbSync.Api (
   fullInsertOptions,
   defaultInsertOptions,
-  turboInsertOptions,
+  onlyGovInsertOptions,
+  disableAllInsertOptions,
   setConsistentLevel,
   getConsistentLevel,
   isConsistent,
@@ -19,7 +20,7 @@ module Cardano.DbSync.Api (
   getIsSyncFixed,
   setIsFixed,
   setIsFixedAndMigrate,
-  getBootstrapState,
+  getDisableInOutState,
   getRanIndexes,
   runIndexMigrations,
   initPruneConsumeMigration,
@@ -131,8 +132,12 @@ setIsFixedAndMigrate env fr = do
   envRunDelayedMigration env DB.Fix
   atomically $ writeTVar (envIsFixed env) fr
 
-getBootstrapState :: SyncEnv -> IO Bool
-getBootstrapState = readTVarIO . envBootstrap
+getDisableInOutState :: SyncEnv -> IO Bool
+getDisableInOutState syncEnv = do
+  bst <- readTVarIO $ envBootstrap syncEnv
+  pure $ bst || not (ioInOut iopts)
+  where
+    iopts = getInsertOptions syncEnv
 
 getRanIndexes :: SyncEnv -> IO Bool
 getRanIndexes env = do
@@ -194,13 +199,16 @@ getPrunes = do
   DB.pcmPruneTxOut . getPruneConsume
 
 fullInsertOptions :: InsertOptions
-fullInsertOptions = InsertOptions True True True True
+fullInsertOptions = InsertOptions True True True True True True True
 
 defaultInsertOptions :: InsertOptions
 defaultInsertOptions = fullInsertOptions
 
-turboInsertOptions :: InsertOptions
-turboInsertOptions = InsertOptions False False False False
+onlyGovInsertOptions :: InsertOptions
+onlyGovInsertOptions = disableAllInsertOptions {ioGov = True}
+
+disableAllInsertOptions :: InsertOptions
+disableAllInsertOptions = InsertOptions False False False False False False False
 
 initEpochState :: EpochState
 initEpochState =

@@ -19,11 +19,10 @@ module Cardano.DbSync.Era.Shelley.Insert.Epoch (
 import Cardano.BM.Trace (Trace, logInfo)
 import qualified Cardano.Db as DB
 import Cardano.DbSync.Api
-import Cardano.DbSync.Api.Types (SyncEnv (..))
-import Cardano.DbSync.Cache (queryPoolKeyWithCache, queryStakeAddrWithCache)
+import Cardano.DbSync.Api.Types (InsertOptions (..), SyncEnv (..))
+import Cardano.DbSync.Cache (queryOrInsertStakeAddress, queryPoolKeyOrInsert)
 import Cardano.DbSync.Cache.Types (Cache, CacheNew (..))
 import qualified Cardano.DbSync.Era.Shelley.Generic as Generic
-import Cardano.DbSync.Era.Util (liftLookupFail)
 import Cardano.DbSync.Error
 import Cardano.DbSync.Types
 import Cardano.DbSync.Util.Constraint (constraintNameEpochStake, constraintNameReward)
@@ -83,8 +82,8 @@ insertEpochStake syncEnv nw epochNo stakeChunk = do
       (StakeCred, (Shelley.Coin, PoolKeyHash)) ->
       ExceptT SyncNodeError (ReaderT SqlBackend m) DB.EpochStake
     mkStake cache (saddr, (coin, pool)) = do
-      saId <- liftLookupFail "insertEpochStake.queryStakeAddrWithCache" $ queryStakeAddrWithCache cache CacheNew nw saddr
-      poolId <- liftLookupFail "insertEpochStake.queryPoolKeyWithCache" $ queryPoolKeyWithCache cache CacheNew pool
+      saId <- lift $ queryOrInsertStakeAddress cache CacheNew nw saddr
+      poolId <- lift $ queryPoolKeyOrInsert "insertEpochStake" trce cache CacheNew (ioShelley iopts) pool
       pure $
         DB.EpochStake
           { DB.epochStakeAddrId = saId
@@ -92,6 +91,9 @@ insertEpochStake syncEnv nw epochNo stakeChunk = do
           , DB.epochStakeAmount = Generic.coinToDbLovelace coin
           , DB.epochStakeEpochNo = unEpochNo epochNo -- The epoch where this delegation becomes valid.
           }
+
+    trce = getTrace syncEnv
+    iopts = getInsertOptions syncEnv
 
 insertRewards ::
   (MonadBaseControl IO m, MonadIO m) =>
@@ -114,7 +116,7 @@ insertRewards syncEnv nw earnedEpoch spendableEpoch cache rewardsChunk = do
       (StakeCred, Set Generic.Reward) ->
       ExceptT SyncNodeError (ReaderT SqlBackend m) [DB.Reward]
     mkRewards (saddr, rset) = do
-      saId <- liftLookupFail "insertRewards.queryStakeAddrWithCache" $ queryStakeAddrWithCache cache CacheNew nw saddr
+      saId <- lift $ queryOrInsertStakeAddress cache CacheNew nw saddr
       mapMaybeM (prepareReward saId) (Set.toList rset)
 
     -- For rewards with a null pool, the reward unique key doesn't work.
@@ -148,7 +150,10 @@ insertRewards syncEnv nw earnedEpoch spendableEpoch cache rewardsChunk = do
       ExceptT SyncNodeError (ReaderT SqlBackend m) (Maybe DB.PoolHashId)
     queryPool Strict.Nothing = pure Nothing
     queryPool (Strict.Just poolHash) =
-      Just <$> liftLookupFail "insertRewards.queryPoolKeyWithCache" (queryPoolKeyWithCache cache CacheNew poolHash)
+      Just <$> lift (queryPoolKeyOrInsert "insertRewards" trce cache CacheNew (ioShelley iopts) poolHash)
+
+    trce = getTrace syncEnv
+    iopts = getInsertOptions syncEnv
 
 splittRecordsEvery :: Int -> [a] -> [[a]]
 splittRecordsEvery val = go
