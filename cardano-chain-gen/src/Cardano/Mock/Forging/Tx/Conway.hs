@@ -7,16 +7,21 @@
 
 module Cardano.Mock.Forging.Tx.Conway (
   Babbage.TxOutScriptType (..),
+  Babbage.DatumType (..),
+  Babbage.ReferenceScript (..),
   consTxBody,
   consCertTxBody,
   consPoolParams,
+  consTxCertPool,
   mkPaymentTx,
   mkPaymentTx',
   mkLockByScriptTx,
   mkUnlockScriptTx,
+  mkUnlockScriptTxBabbage,
   mkScriptTx,
   mkSimpleTx,
   mkDCertTx,
+  mkDCertPoolTx,
   mkDCertTxPools,
   mkSimpleDCertTx,
   mkScriptDCertTx,
@@ -32,6 +37,7 @@ module Cardano.Mock.Forging.Tx.Conway (
   Babbage.mkScriptInp,
   mkWitnesses,
   mkUTxOConway,
+  mkUTxOCollConway,
   addValidityInterval,
 ) where
 
@@ -52,7 +58,7 @@ import Cardano.Ledger.Conway.TxOut (BabbageTxOut (..))
 import qualified Cardano.Ledger.Core as Core
 import Cardano.Ledger.Credential (Credential (..), StakeCredential, StakeReference (..))
 import Cardano.Ledger.Crypto (ADDRHASH ())
-import Cardano.Ledger.Keys (KeyHash (..))
+import Cardano.Ledger.Keys (KeyHash (..), KeyRole (..))
 import Cardano.Ledger.Mary.Value (MaryValue (..), MultiAsset (..), PolicyID (..), valueFromList)
 import Cardano.Ledger.Plutus.Data
 import Cardano.Ledger.Plutus.Language (Language (..))
@@ -131,6 +137,21 @@ consCertTxBody ref = consTxBody mempty mempty (toSet ref) mempty SNothing (Coin 
   where
     toSet Nothing = mempty
     toSet (Just a) = Set.singleton a
+
+consTxCertPool ::
+  [StakeCredential StandardCrypto] ->
+  KeyHash 'StakePool StandardCrypto ->
+  ConwayTxCert StandardConway
+consTxCertPool [] _ = panic "Expected at least 1 pool owner"
+consTxCertPool (rwCred : poolOwners) poolId =
+  ConwayTxCertPool
+    . Core.RegPool
+    . consPoolParams poolId rwCred
+    . map unKeyHashObj
+    $ poolOwners
+  where
+    unKeyHashObj (KeyHashObj owner) = owner
+    unKeyHashObj _ = panic "Expected a KeyHashObj"
 
 mkPaymentTx ::
   ConwayUTxOIndex ->
@@ -218,30 +239,37 @@ mkUnlockScriptTx ::
   Integer ->
   ConwayLedgerState ->
   Either ForgingError (AlonzoTx StandardConway)
-mkUnlockScriptTx inputIndex colInputIndex outputIndex succeeds amount fees state' = do
-  inputPairs <- map fst <$> mapM (`resolveUTxOIndex` state') inputIndex
-  (colInputPair, _) <- resolveUTxOIndex colInputIndex state'
-  addr <- resolveAddress outputIndex state'
+mkUnlockScriptTx inputIndex colInputIndex outputIndex =
+  mkUnlockScriptTx' inputIndex colInputIndex outputIndex mempty Nothing
 
-  let inputs = Set.fromList $ map fst inputPairs
-      colInputs = Set.singleton $ fst colInputPair
-      output =
-        BabbageTxOut
-          addr
-          (valueFromList (Coin amount) [])
-          NoDatum
-          SNothing
+mkUnlockScriptTxBabbage ::
+  [ConwayUTxOIndex] ->
+  ConwayUTxOIndex ->
+  ConwayUTxOIndex ->
+  [ConwayUTxOIndex] ->
+  Bool ->
+  Bool ->
+  Integer ->
+  Integer ->
+  ConwayLedgerState ->
+  Either ForgingError (AlonzoTx StandardConway)
+mkUnlockScriptTxBabbage inputIndex colInputIndex outputIndex refInput compl succeeds amount fees state' = do
+  let colTxOutType =
+        if compl
+          then Just $ Babbage.TxOutInline True Babbage.InlineDatum (Babbage.ReferenceScript True)
+          else Just $ Babbage.TxOutNoInline True
+      colOutput = mkOutFromType amount <$> colTxOutType
 
-  pure $
-    mkScriptTx succeeds (mkScriptInps inputPairs) $
-      consPaymentTxBody
-        inputs
-        colInputs
-        mempty
-        (StrictSeq.singleton output)
-        SNothing
-        (Coin fees)
-        mempty
+  mkUnlockScriptTx'
+    inputIndex
+    colInputIndex
+    outputIndex
+    refInput
+    colOutput
+    succeeds
+    amount
+    fees
+    state'
 
 mkDCertTx ::
   [ConwayTxCert StandardConway] ->
@@ -249,6 +277,24 @@ mkDCertTx ::
   Maybe (TxIn StandardCrypto) ->
   Either ForgingError (AlonzoTx StandardConway)
 mkDCertTx certs wdrl ref = Right (mkSimpleTx True $ consCertTxBody ref certs wdrl)
+
+mkDCertPoolTx ::
+  [ ( [StakeIndex]
+    , PoolIndex
+    , [StakeCredential StandardCrypto] ->
+      KeyHash 'StakePool StandardCrypto ->
+      ConwayTxCert StandardConway
+    )
+  ] ->
+  ConwayLedgerState ->
+  Either ForgingError (AlonzoTx StandardConway)
+mkDCertPoolTx consDCert state' = do
+  dcerts <- forM consDCert $ \(stakeIxs, poolIx, mkDCert) -> do
+    stakeCreds <- forM stakeIxs $ \stakeIx -> resolveStakeCreds stakeIx state'
+    let poolId = resolvePool poolIx state'
+    pure $ mkDCert stakeCreds poolId
+
+  mkDCertTx dcerts (Withdrawals mempty) Nothing
 
 mkDCertTxPools :: ConwayLedgerState -> Either ForgingError (AlonzoTx StandardConway)
 mkDCertTxPools state' =
@@ -297,7 +343,7 @@ mkScriptDCertTx consCert isValid' state' = do
           mkRedeemer n (alwaysSucceedsScriptHash, alwaysSucceedsScript)
     prepareRedeemer _ = Nothing
 
-    mkRedeemer n (a, b) = Just (RdmrPtr Cert n, (a, b))
+    mkRedeemer n (a, b) = Just (RdmrPtr Cert n, Just (a, b))
 
 mkMultiAssetsScriptTx ::
   [ConwayUTxOIndex] ->
@@ -554,17 +600,17 @@ mkFullTx n m state' = do
 
 mkScriptMint ::
   MultiAsset StandardCrypto ->
-  [(RdmrPtr, (Core.ScriptHash StandardCrypto, Core.Script StandardConway))]
+  [(RdmrPtr, Maybe (Core.ScriptHash StandardCrypto, Core.Script StandardConway))]
 mkScriptMint (MultiAsset m) =
   mapMaybe mkMint . zip [0 ..] . map policyID $ Map.keys m
   where
     mkMint (n, policyId)
       | policyId == alwaysFailsScriptHash =
-          Just (RdmrPtr Mint n, alwaysFails)
+          Just (RdmrPtr Mint n, Just alwaysFails)
       | policyId == alwaysSucceedsScriptHash =
-          Just (RdmrPtr Mint n, alwaysSucceeds)
+          Just (RdmrPtr Mint n, Just alwaysSucceeds)
       | policyId == alwaysMintScriptHash =
-          Just (RdmrPtr Mint n, alwaysMint)
+          Just (RdmrPtr Mint n, Just alwaysMint)
       | otherwise = Nothing
 
     alwaysFails = (alwaysFailsScriptHash, alwaysFailsScript)
@@ -588,6 +634,11 @@ mkUTxOConway ::
   [(TxIn StandardCrypto, BabbageTxOut StandardConway)]
 mkUTxOConway = mkUTxOAlonzo
 
+mkUTxOCollConway ::
+  AlonzoTx StandardConway ->
+  [(TxIn StandardCrypto, BabbageTxOut StandardConway)]
+mkUTxOCollConway = Babbage.mkUTxOCollBabbage
+
 mkOutFromType ::
   Integer ->
   Babbage.TxOutScriptType ->
@@ -610,18 +661,48 @@ mkOutFromType amount txOutType =
       SJust True -> SJust alwaysSucceedsScript
       SJust False -> SJust alwaysFailsScript
 
--- | Takes a nested Monad of the form Monad (_, Monad), and combines them into one
--- outer monad
-joinSnd :: Monad m => m (a, m b) -> m (a, b)
-joinSnd m = do
-  (a, m') <- m
-  b <- m'
-  pure (a, b)
-
 mkScriptInps ::
   [(TxIn StandardCrypto, Core.TxOut StandardConway)] ->
-  [(RdmrPtr, (Core.ScriptHash StandardCrypto, Core.Script StandardConway))]
-mkScriptInps = mapMaybe joinSnd . map Babbage.mkScriptInp . zip [0 ..]
+  [(RdmrPtr, Maybe (Core.ScriptHash StandardCrypto, Core.Script StandardConway))]
+mkScriptInps = mapMaybe Babbage.mkScriptInp . zip [0 ..]
+
+mkUnlockScriptTx' ::
+  [ConwayUTxOIndex] ->
+  ConwayUTxOIndex ->
+  ConwayUTxOIndex ->
+  [ConwayUTxOIndex] ->
+  Maybe (BabbageTxOut StandardConway) ->
+  Bool ->
+  Integer ->
+  Integer ->
+  ConwayLedgerState ->
+  Either ForgingError (AlonzoTx StandardConway)
+mkUnlockScriptTx' inputIndex colInputIndex outputIndex refInput colOut succeeds amount fees state' = do
+  inputPairs <- map fst <$> mapM (`resolveUTxOIndex` state') inputIndex
+  refInputPairs <- map fst <$> mapM (`resolveUTxOIndex` state') refInput
+  (colInputPair, _) <- resolveUTxOIndex colInputIndex state'
+  addr <- resolveAddress outputIndex state'
+
+  let inputs = Set.fromList $ map fst inputPairs
+      colInputs = Set.singleton $ fst colInputPair
+      refInputs = Set.fromList $ map fst refInputPairs
+      output =
+        BabbageTxOut
+          addr
+          (valueFromList (Coin amount) [])
+          NoDatum
+          SNothing
+
+  pure $
+    mkScriptTx succeeds (mkScriptInps inputPairs) $
+      consPaymentTxBody
+        inputs
+        colInputs
+        refInputs
+        (StrictSeq.singleton output)
+        (maybeToStrictMaybe colOut)
+        (Coin fees)
+        mempty
 
 allPoolStakeCert' :: ConwayLedgerState -> [ConwayTxCert StandardConway]
 allPoolStakeCert' st = map (mkRegTxCert SNothing) (getCreds st)
