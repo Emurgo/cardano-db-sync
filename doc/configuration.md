@@ -105,14 +105,27 @@ Disables fetching pool offchain metadata.
 
 Disables all data related to governance
 
-### --disable-all
+### --disable-all : Experimental
 
 Disables almost all data except `block`, `tx` and data related to the ledger state
+
+### --dont-use-ledger : Experimental
+
+Maintains the ledger state, but doesn't use any of its data, except to load UTxO. To be used with `--bootstrap-tx-out`
+
+### --only-utxo : Experimental
+
+This is the equivalent of using `--dont-use-ledger`
+`--disable-shelley`, `--disable-plutus-extra`, `--disable-offchain-pool-data`, `--disable-gov`, `--bootstrap-tx-out`.
+This mode initially populates only a few tables, like `block` and `tx`. It maintains a ledger state but doesn't use any of its data. When syncing is completed, it loads the whole UTxO set from the ledger to the `tx_out` and `ma_tx_out` tables.
+After that db-sync can be restarted with `--disable-ledger-state` to continue
+syncing without maintaining the ledger
 
 ### --only-gov : Experimental
 
 Disables most data except governance data. This is the equivalent of using `--disable-in-out`,
-`--disable-shelley`, `--disable-multiassets`, `--disable-plutus-extra`, `--disable-offchain-pool-data`.
+`--disable-shelley`, `--disable-multiassets`, `--disable-plutus-extra`, `--disable-offchain-pool-data`,
+with the only difference that it also disables the `reward` table even when the ledger is used.
 
 ### --consumed-tx-out
 

@@ -9,7 +9,7 @@
 
 module Cardano.DbSync.Api (
   fullInsertOptions,
-  defaultInsertOptions,
+  onlyUTxOInsertOptions,
   onlyGovInsertOptions,
   disableAllInsertOptions,
   setConsistentLevel,
@@ -198,17 +198,28 @@ getPrunes :: SyncEnv -> Bool
 getPrunes = do
   DB.pcmPruneTxOut . getPruneConsume
 
-fullInsertOptions :: InsertOptions
-fullInsertOptions = InsertOptions True True True True True True True
+fullInsertOptions :: Bool -> InsertOptions
+fullInsertOptions useLedger = InsertOptions True useLedger True True True True True True True
 
-defaultInsertOptions :: InsertOptions
-defaultInsertOptions = fullInsertOptions
+onlyUTxOInsertOptions :: InsertOptions
+onlyUTxOInsertOptions =
+  InsertOptions
+    { ioInOut = True
+    , ioUseLedger = False
+    , ioShelley = False
+    , ioRewards = False
+    , ioMultiAssets = True
+    , ioMetadata = False
+    , ioPlutusExtra = False
+    , ioOffChainPoolData = False
+    , ioGov = False
+    }
 
-onlyGovInsertOptions :: InsertOptions
-onlyGovInsertOptions = disableAllInsertOptions {ioGov = True}
+onlyGovInsertOptions :: Bool -> InsertOptions
+onlyGovInsertOptions useLedger = (disableAllInsertOptions useLedger) {ioGov = True}
 
-disableAllInsertOptions :: InsertOptions
-disableAllInsertOptions = InsertOptions False False False False False False False
+disableAllInsertOptions :: Bool -> InsertOptions
+disableAllInsertOptions useLedger = InsertOptions False useLedger False False False False False False False
 
 initEpochState :: EpochState
 initEpochState =
@@ -342,7 +353,7 @@ mkSyncEnv trce backend syncOptions protoInfo nw nwMagic systemStart syncNP ranMi
   epochVar <- newTVarIO initEpochState
   epochSyncTime <- newTVarIO =<< getCurrentTime
   ledgerEnvType <-
-    case (enpMaybeLedgerStateDir syncNP, enpShouldUseLedger syncNP) of
+    case (enpMaybeLedgerStateDir syncNP, enpHasLedger syncNP) of
       (Just dir, True) ->
         HasLedger
           <$> mkHasLedgerEnv

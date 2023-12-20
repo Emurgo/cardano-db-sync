@@ -235,19 +235,24 @@ extractSyncOptions snp aop =
     }
   where
     iopts
-      | enpOnlyGov snp = onlyGovInsertOptions
-      | enpFullMode snp = fullInsertOptions
-      | enpDisableAllMode snp = disableAllInsertOptions
+      | enpOnlyGov snp = onlyGovInsertOptions useLedger
+      | enpOnlyUTxO snp = onlyUTxOInsertOptions
+      | enpFullMode snp = fullInsertOptions useLedger
+      | enpDisableAllMode snp = disableAllInsertOptions useLedger
       | otherwise =
           InsertOptions
             { ioInOut = enpHasInOut snp
+            , ioUseLedger = useLedger
             , ioShelley = enpHasShelley snp
+            , ioRewards = True
             , ioMultiAssets = enpHasMultiAssets snp
             , ioMetadata = enpHasMetadata snp
             , ioPlutusExtra = enpHasPlutusExtra snp
             , ioOffChainPoolData = enpHasOffChainPoolData snp
             , ioGov = enpHasGov snp
             }
+
+    useLedger = enpHasLedger snp && enpShouldUseLedger snp && not (enpOnlyUTxO snp)
 
 startupReport :: Trace IO Text -> Bool -> SyncNodeParams -> IO ()
 startupReport trce aop params = do

@@ -62,7 +62,7 @@ import Cardano.DbSync.Util.Bech32
 import Cardano.DbSync.Util.Cbor (serialiseTxMetadataToCbor)
 import qualified Cardano.Ledger.Address as Ledger
 import qualified Cardano.Ledger.Alonzo.Scripts as Ledger
-import Cardano.Ledger.BaseTypes (getVersion, strictMaybeToMaybe)
+import Cardano.Ledger.BaseTypes
 import qualified Cardano.Ledger.BaseTypes as Ledger
 import Cardano.Ledger.Coin (Coin (..))
 import qualified Cardano.Ledger.Coin as Ledger
@@ -80,13 +80,10 @@ import qualified Cardano.Ledger.Shelley.API.Wallet as Shelley
 import qualified Cardano.Ledger.Shelley.TxBody as Shelley
 import Cardano.Ledger.Shelley.TxCert
 import Cardano.Prelude
-import Cardano.Slotting.Block (BlockNo (..))
-import Cardano.Slotting.Slot (EpochNo (..), EpochSize (..), SlotNo (..))
 import Control.Monad.Extra (whenJust)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Control.Monad.Trans.Except.Extra (newExceptT)
 import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Either.Extra (eitherToMaybe)
 import Data.Group (invert)
@@ -350,12 +347,19 @@ insertTx syncEnv isMember blkId epochNo slotNo applyResult blockIndex tx grouped
 
       txMetadata <-
         whenFalseMempty (ioMetadata iopts) $
-          prepareTxMetadata tracer txId (Generic.txMetadata tx)
-
-      when (ioShelley iopts) $ do
-        mapM_ (insertCertificate syncEnv isMember blkId txId epochNo slotNo redeemers) $ Generic.txCertificates tx
-        mapM_ (insertWithdrawals tracer cache txId redeemers) $ Generic.txWithdrawals tx
-        mapM_ (lift . insertParamProposal blkId txId) $ Generic.txParamProposal tx
+          prepareTxMetadata
+            tracer
+            txId
+            (Generic.txMetadata tx)
+      mapM_
+        (insertCertificate syncEnv isMember blkId txId epochNo slotNo redeemers)
+        $ Generic.txCertificates tx
+      when (ioShelley iopts) $
+        mapM_ (insertWithdrawals tracer cache txId redeemers) $
+          Generic.txWithdrawals tx
+      when (ioShelley iopts) $
+        mapM_ (lift . insertParamProposal blkId txId) $
+          Generic.txParamProposal tx
 
       maTxMint <-
         whenFalseMempty (ioMetadata iopts) $
@@ -371,7 +375,7 @@ insertTx syncEnv isMember blkId epochNo slotNo applyResult blockIndex tx grouped
           Generic.txExtraKeyWitnesses tx
 
       when (ioGov iopts) $ do
-        mapM_ (lift . insertGovernanceAction cache blkId txId (getGovExpiresAt applyResult epochNo)) $ zip [0 ..] (Generic.txProposalProcedure tx)
+        mapM_ (insertGovActionProposal cache blkId txId (getGovExpiresAt applyResult epochNo)) $ zip [0 ..] (Generic.txProposalProcedure tx)
         mapM_ (insertVotingProcedures tracer cache txId) (Generic.txVotingProcedure tx)
 
       let !txIns = map (prepareTxIn txId redeemers) resolvedInputs
@@ -523,13 +527,20 @@ insertCertificate ::
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
 insertCertificate syncEnv isMember blkId txId epochNo slotNo redeemers (Generic.TxCertificate ridx idx cert) =
   case cert of
-    Left (ShelleyTxCertDelegCert deleg) -> insertDelegCert tracer cache network txId idx mRedeemerId epochNo slotNo deleg
-    Left (ShelleyTxCertPool pool) -> insertPoolCert tracer cache isMember network epochNo blkId txId idx pool
-    Left (ShelleyTxCertMir mir) -> insertMirCert tracer cache network txId idx mir
+    Left (ShelleyTxCertDelegCert deleg) ->
+      when (ioShelley iopts) $ insertDelegCert tracer cache network txId idx mRedeemerId epochNo slotNo deleg
+    Left (ShelleyTxCertPool pool) ->
+      when (ioShelley iopts) $ insertPoolCert tracer cache isMember network epochNo blkId txId idx pool
+    Left (ShelleyTxCertMir mir) ->
+      when (ioShelley iopts) $ insertMirCert tracer cache network txId idx mir
     Left (ShelleyTxCertGenesisDeleg _gen) ->
-      liftIO $ logWarning tracer "insertCertificate: Unhandled DCertGenesis certificate"
-    Right (ConwayTxCertDeleg deleg) -> insertConwayDelegCert syncEnv txId idx mRedeemerId epochNo slotNo deleg
-    Right (ConwayTxCertPool pool) -> insertPoolCert tracer cache isMember network epochNo blkId txId idx pool
+      when (ioShelley iopts) $
+        liftIO $
+          logWarning tracer "insertCertificate: Unhandled DCertGenesis certificate"
+    Right (ConwayTxCertDeleg deleg) ->
+      when (ioShelley iopts) $ insertConwayDelegCert syncEnv txId idx mRedeemerId epochNo slotNo deleg
+    Right (ConwayTxCertPool pool) ->
+      when (ioShelley iopts) $ insertPoolCert tracer cache isMember network epochNo blkId txId idx pool
     Right (ConwayTxCertGov c) ->
       when (ioGov iopts) $ case c of
         ConwayRegDRep cred coin anchor ->
@@ -1424,51 +1435,63 @@ mkAdaPots blockId slotNo epochNo pots =
     , DB.adaPotsBlockId = blockId
     }
 
-insertGovernanceAction ::
+insertGovActionProposal ::
   (MonadIO m, MonadBaseControl IO m) =>
   Cache ->
   DB.BlockId ->
   DB.TxId ->
   Maybe EpochNo ->
   (Word64, ProposalProcedure StandardConway) ->
-  ReaderT SqlBackend m ()
-insertGovernanceAction cache blkId txId govExpiresAt (index, pp) = do
+  ExceptT SyncNodeError (ReaderT SqlBackend m) ()
+insertGovActionProposal cache blkId txId govExpiresAt (index, pp) = do
   addrId <-
-    queryOrInsertRewardAccount cache CacheNew $ pProcReturnAddr pp
-  votingAnchorId <- insertAnchor txId $ pProcAnchor pp
-  mParamProposalId <-
+    lift $ queryOrInsertRewardAccount cache CacheNew $ pProcReturnAddr pp
+  votingAnchorId <- lift $ insertAnchor txId $ pProcAnchor pp
+  mParamProposalId <- lift $
     case pProcGovAction pp of
       ParameterChange _ pparams ->
         Just <$> insertParamProposal blkId txId (convertConwayParamProposal pparams)
       _ -> pure Nothing
-  governanceAction <-
-    DB.insertGovernanceAction $
-      DB.GovernanceAction
-        { DB.governanceActionTxId = txId
-        , DB.governanceActionIndex = index
-        , DB.governanceActionDeposit = Generic.coinToDbLovelace $ pProcDeposit pp
-        , DB.governanceActionReturnAddress = addrId
-        , DB.governanceActionExpiration = unEpochNo <$> govExpiresAt
-        , DB.governanceActionVotingAnchorId = Just votingAnchorId
-        , DB.governanceActionType = Generic.toGovAction $ pProcGovAction pp
-        , DB.governanceActionDescription = textShow $ pProcGovAction pp
-        , DB.governanceActionParamProposal = mParamProposalId
-        , DB.governanceActionRatifiedEpoch = Nothing
-        , DB.governanceActionEnactedEpoch = Nothing
-        , DB.governanceActionDroppedEpoch = Nothing
-        , DB.governanceActionExpiredEpoch = Nothing
-        }
+  prevGovActionDBId <- case mprevGovAction of
+    Nothing -> pure Nothing
+    Just prevGovActionId -> Just <$> resolveGovActionProposal prevGovActionId
+  govActionProposal <-
+    lift $
+      DB.insertGovActionProposal $
+        DB.GovActionProposal
+          { DB.govActionProposalTxId = txId
+          , DB.govActionProposalIndex = index
+          , DB.govActionProposalPrevGovActionProposal = prevGovActionDBId
+          , DB.govActionProposalDeposit = Generic.coinToDbLovelace $ pProcDeposit pp
+          , DB.govActionProposalReturnAddress = addrId
+          , DB.govActionProposalExpiration = unEpochNo <$> govExpiresAt
+          , DB.govActionProposalVotingAnchorId = Just votingAnchorId
+          , DB.govActionProposalType = Generic.toGovAction $ pProcGovAction pp
+          , DB.govActionProposalDescription = Text.decodeUtf8 $ LBS.toStrict $ Aeson.encode (pProcGovAction pp)
+          , DB.govActionProposalParamProposal = mParamProposalId
+          , DB.govActionProposalRatifiedEpoch = Nothing
+          , DB.govActionProposalEnactedEpoch = Nothing
+          , DB.govActionProposalDroppedEpoch = Nothing
+          , DB.govActionProposalExpiredEpoch = Nothing
+          }
   case pProcGovAction pp of
-    TreasuryWithdrawals mp -> mapM_ (insertTreasuryWithdrawal governanceAction) (Map.toList mp)
-    UpdateCommittee _ removed added q -> insertNewCommittee governanceAction removed added q
+    TreasuryWithdrawals mp -> lift $ mapM_ (insertTreasuryWithdrawal govActionProposal) (Map.toList mp)
+    UpdateCommittee _ removed added q -> lift $ insertNewCommittee govActionProposal removed added q
     _ -> pure ()
   where
+    mprevGovAction :: Maybe (GovActionId StandardCrypto) = case pProcGovAction pp of
+      ParameterChange prv _ -> unPrevGovActionId <$> strictMaybeToMaybe prv
+      HardForkInitiation prv _ -> unPrevGovActionId <$> strictMaybeToMaybe prv
+      NoConfidence prv -> unPrevGovActionId <$> strictMaybeToMaybe prv
+      UpdateCommittee prv _ _ _ -> unPrevGovActionId <$> strictMaybeToMaybe prv
+      _ -> Nothing
+
     insertTreasuryWithdrawal gaId (rwdAcc, coin) = do
       addrId <-
         queryOrInsertRewardAccount cache CacheNew rwdAcc
       DB.insertTreasuryWithdrawal $
         DB.TreasuryWithdrawal
-          { DB.treasuryWithdrawalGovernanceActionId = gaId
+          { DB.treasuryWithdrawalGovActionProposalId = gaId
           , DB.treasuryWithdrawalStakeAddressId = addrId
           , DB.treasuryWithdrawalAmount = Generic.coinToDbLovelace coin
           }
@@ -1476,11 +1499,14 @@ insertGovernanceAction cache blkId txId govExpiresAt (index, pp) = do
     insertNewCommittee gaId removed added q = do
       void . DB.insertNewCommittee $
         DB.NewCommittee
-          { DB.newCommitteeGovernanceActionId = gaId
-          , DB.newCommitteeQuorum = toDouble q
+          { DB.newCommitteeGovActionProposalId = gaId
+          , DB.newCommitteeQuorumNominator = fromIntegral $ numerator r
+          , DB.newCommitteeQuorumDenominator = fromIntegral $ denominator r
           , DB.newCommitteeDeletedMembers = textShow removed
           , DB.newCommitteeAddedMembers = textShow added
           }
+      where
+        r = unboundRational q -- TODO work directly with Ratio Word64. This is not currently supported in ledger
 
 insertAnchor :: (MonadIO m, MonadBaseControl IO m) => DB.TxId -> Anchor StandardCrypto -> ReaderT SqlBackend m DB.VotingAnchorId
 insertAnchor txId anchor =
@@ -1510,7 +1536,7 @@ insertVotingProcedure ::
   (Word16, (GovActionId StandardCrypto, VotingProcedure StandardConway)) ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
 insertVotingProcedure trce cache txId voter (index, (gaId, vp)) = do
-  govActionId <- resolveGovernanceAction gaId
+  govActionId <- resolveGovActionProposal gaId
   votingAnchorId <- whenMaybe (strictMaybeToMaybe $ vProcAnchor vp) $ lift . insertAnchor txId
   (mCommitteeVoter, mDRepVoter, mStakePoolVoter) <- case voter of
     CommitteeVoter cred ->
@@ -1525,7 +1551,7 @@ insertVotingProcedure trce cache txId voter (index, (gaId, vp)) = do
     DB.VotingProcedure
       { DB.votingProcedureTxId = txId
       , DB.votingProcedureIndex = index
-      , DB.votingProcedureGovernanceActionId = govActionId
+      , DB.votingProcedureGovActionProposalId = govActionId
       , DB.votingProcedureCommitteeVoter = mCommitteeVoter
       , DB.votingProcedureDrepVoter = mDRepVoter
       , DB.votingProcedurePoolVoter = mStakePoolVoter
@@ -1534,43 +1560,31 @@ insertVotingProcedure trce cache txId voter (index, (gaId, vp)) = do
       , DB.votingProcedureVotingAnchorId = votingAnchorId
       }
 
-resolveGovernanceAction ::
+resolveGovActionProposal ::
   MonadIO m =>
   GovActionId StandardCrypto ->
-  ExceptT SyncNodeError (ReaderT SqlBackend m) DB.GovernanceActionId
-resolveGovernanceAction gaId = do
+  ExceptT SyncNodeError (ReaderT SqlBackend m) DB.GovActionProposalId
+resolveGovActionProposal gaId = do
   gaTxId <-
-    liftLookupFail "resolveGovernanceAction.queryTxId" $
+    liftLookupFail "resolveGovActionProposal.queryTxId" $
       DB.queryTxId $
         Generic.unTxHash $
           gaidTxId gaId
   let (GovActionIx index) = gaidGovActionIx gaId
-  liftLookupFail "resolveGovernanceAction.queryGovernanceActionId" $
-    DB.queryGovernanceActionId gaTxId (fromIntegral index) -- TODO: Use Word32?
+  liftLookupFail "resolveGovActionProposal.queryGovActionProposalId" $
+    DB.queryGovActionProposalId gaTxId (fromIntegral index) -- TODO: Use Word32?
 
 insertDrep :: (MonadBaseControl IO m, MonadIO m) => DRep StandardCrypto -> ReaderT SqlBackend m DB.DrepHashId
 insertDrep = \case
   DRepCredential cred -> insertCredDrepHash cred
-  DRepAlwaysAbstain ->
-    DB.insertDrepHash
-      DB.DrepHash
-        { DB.drepHashRaw = BS.replicate 28 '\0'
-        , DB.drepHashView = "drep_always_abstain"
-        , DB.drepHashHasScript = False
-        }
-  DRepAlwaysNoConfidence ->
-    DB.insertDrepHash
-      DB.DrepHash
-        { DB.drepHashRaw = BS.replicate 28 '\0'
-        , DB.drepHashView = "drep_always_no_confidence"
-        , DB.drepHashHasScript = False
-        }
+  DRepAlwaysAbstain -> DB.insertAlwaysAbstainDrep
+  DRepAlwaysNoConfidence -> DB.insertAlwaysNoConfidence
 
 insertCredDrepHash :: (MonadBaseControl IO m, MonadIO m) => Ledger.Credential 'DRepRole StandardCrypto -> ReaderT SqlBackend m DB.DrepHashId
 insertCredDrepHash cred = do
   DB.insertDrepHash
     DB.DrepHash
-      { DB.drepHashRaw = bs
+      { DB.drepHashRaw = Just bs
       , DB.drepHashView = serialiseDrepToBech32 bs
       , DB.drepHashHasScript = Generic.hasCredScript cred
       }
@@ -1602,7 +1616,7 @@ insertDrepDistr e pSnapshot = do
 updateEnacted :: forall m. (MonadBaseControl IO m, MonadIO m) => Bool -> EpochNo -> EnactState StandardConway -> ExceptT SyncNodeError (ReaderT SqlBackend m) ()
 updateEnacted isEnacted epochNo enactedState = do
   whenJust (strictMaybeToMaybe (enactedState ^. ensPrevPParamUpdateL)) $ \prevId -> do
-    gaId <- resolveGovernanceAction $ getPrevId prevId
+    gaId <- resolveGovActionProposal $ getPrevId prevId
     if isEnacted
       then lift $ DB.updateGovActionEnacted gaId (unEpochNo epochNo)
       else lift $ DB.updateGovActionRatified gaId (unEpochNo epochNo)

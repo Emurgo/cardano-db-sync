@@ -102,7 +102,7 @@ data CommandLineArgs = CommandLineArgs
   { claHasConfigFile :: Bool
   , claEpochDisabled :: Bool
   , claHasCache :: Bool
-  , claShouldUseLedger :: Bool
+  , claHasLedger :: Bool
   , claSkipFix :: Bool
   , claOnlyFix :: Bool
   , claForceIndexes :: Bool
@@ -259,7 +259,8 @@ mkSyncNodeParams staticDir mutableDir CommandLineArgs {..} = do
       , enpPGPassSource = Db.PGPassCached pgconfig
       , enpEpochDisabled = claEpochDisabled
       , enpHasCache = claHasCache
-      , enpShouldUseLedger = claShouldUseLedger
+      , enpHasLedger = claHasLedger
+      , enpShouldUseLedger = claHasLedger
       , enpSkipFix = claSkipFix
       , enpOnlyFix = claOnlyFix
       , enpForceIndexes = claForceIndexes
@@ -273,6 +274,7 @@ mkSyncNodeParams staticDir mutableDir CommandLineArgs {..} = do
       , enpForceTxIn = claForceTxIn
       , enpDisableAllMode = False
       , enpFullMode = True
+      , enpOnlyUTxO = False
       , enpOnlyGov = False
       , enpMigrateConsumed = claMigrateConsumed
       , enpPruneTxOut = claPruneTxOut
@@ -288,7 +290,7 @@ initCommandLineArgs =
     { claHasConfigFile = True
     , claEpochDisabled = True
     , claHasCache = True
-    , claShouldUseLedger = True
+    , claHasLedger = True
     , claSkipFix = True
     , claOnlyFix = False
     , claForceIndexes = False
