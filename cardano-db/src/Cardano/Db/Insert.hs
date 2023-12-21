@@ -54,6 +54,8 @@ module Cardano.Db.Insert (
   insertReverseIndex,
   insertCheckOffChainPoolData,
   insertCheckOffChainPoolFetchError,
+  insertOffChainVoteData,
+  insertOffChainVoteFetchError,
   insertReservedPoolTicker,
   insertDelistedPool,
   insertExtraMigration,
@@ -65,6 +67,7 @@ module Cardano.Db.Insert (
   setNullRatified,
   replaceAdaPots,
   insertAnchor,
+  insertConstitution,
   insertGovActionProposal,
   insertTreasuryWithdrawal,
   insertNewCommittee,
@@ -200,7 +203,7 @@ insertManyDrepDistr ::
   (MonadBaseControl IO m, MonadIO m) =>
   [DrepDistr] ->
   ReaderT SqlBackend m ()
-insertManyDrepDistr = insertManyUncheckedUnique "Many DrepDistr"
+insertManyDrepDistr = insertManyCheckUnique "Many DrepDistr"
 
 insertManyTxIn :: (MonadBaseControl IO m, MonadIO m) => [TxIn] -> ReaderT SqlBackend m [TxInId]
 insertManyTxIn = insertMany' "Many TxIn"
@@ -313,6 +316,16 @@ insertCheckOffChainPoolFetchError pofe = do
   foundMeta <- existsPoolMetadataRefId (offChainPoolFetchErrorPmrId pofe)
   when (foundPool && foundMeta) . void $ insertCheckUnique "OffChainPoolFetchError" pofe
 
+insertOffChainVoteData :: (MonadBaseControl IO m, MonadIO m) => OffChainVoteData -> ReaderT SqlBackend m ()
+insertOffChainVoteData ocvd = do
+  foundVotingAnchor <- existsVotingAnchorId (offChainVoteDataVotingAnchorId ocvd)
+  when foundVotingAnchor . void $ insertCheckUnique "OffChainVoteData" ocvd
+
+insertOffChainVoteFetchError :: (MonadBaseControl IO m, MonadIO m) => OffChainVoteFetchError -> ReaderT SqlBackend m ()
+insertOffChainVoteFetchError ocvfe = do
+  foundVotingAnchor <- existsVotingAnchorId (offChainVoteFetchErrorVotingAnchorId ocvfe)
+  when foundVotingAnchor . void $ insertCheckUnique "OffChainVoteFetchError" ocvfe
+
 insertReservedPoolTicker :: (MonadBaseControl IO m, MonadIO m) => ReservedPoolTicker -> ReaderT SqlBackend m (Maybe ReservedPoolTickerId)
 insertReservedPoolTicker ticker = do
   isUnique <- checkUnique ticker
@@ -328,7 +341,7 @@ insertExtraMigration token = void . insert $ ExtraMigrations (textShow token) (J
 
 insertEpochStakeProgress :: (MonadBaseControl IO m, MonadIO m) => [EpochStakeProgress] -> ReaderT SqlBackend m ()
 insertEpochStakeProgress =
-  insertManyUncheckedUnique "Many EpochStakeProgress"
+  insertManyCheckUnique "Many EpochStakeProgress"
 
 updateSetComplete :: MonadIO m => Word64 -> ReaderT SqlBackend m ()
 updateSetComplete epoch = do
@@ -364,6 +377,9 @@ replaceAdaPots blockId adapots = do
 
 insertAnchor :: (MonadBaseControl IO m, MonadIO m) => VotingAnchor -> ReaderT SqlBackend m VotingAnchorId
 insertAnchor = insertCheckUnique "VotingAnchor"
+
+insertConstitution :: (MonadBaseControl IO m, MonadIO m) => Constitution -> ReaderT SqlBackend m ConstitutionId
+insertConstitution = insertUnchecked "Constitution"
 
 insertGovActionProposal :: (MonadBaseControl IO m, MonadIO m) => GovActionProposal -> ReaderT SqlBackend m GovActionProposalId
 insertGovActionProposal = insertUnchecked "GovActionProposal"
@@ -511,7 +527,7 @@ insertManyWithManualUnique ::
   ReaderT SqlBackend m ()
 insertManyWithManualUnique = insertManyUnique
 
-insertManyUncheckedUnique ::
+insertManyCheckUnique ::
   forall m record.
   ( MonadBaseControl IO m
   , MonadIO m
@@ -520,7 +536,7 @@ insertManyUncheckedUnique ::
   String ->
   [record] ->
   ReaderT SqlBackend m ()
-insertManyUncheckedUnique vtype records = do
+insertManyCheckUnique vtype records = do
   let constraintName = uniqueDBName $ onlyOneUniqueDef (Proxy @record)
   insertManyUnique vtype True constraintName records
 

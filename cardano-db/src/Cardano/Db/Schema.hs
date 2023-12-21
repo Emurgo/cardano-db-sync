@@ -607,6 +607,11 @@ share
     deletedMembers      Text
     addedMembers        Text
 
+  Constitution
+    govActionProposalId  GovActionProposalId  noreference
+    votingAnchorId       VotingAnchorId       noreference
+    scriptHash           ByteString Maybe     sqltype=hash28type
+
   VotingProcedure -- GovVote
     txId                 TxId                 noreference
     index                Word16
@@ -650,16 +655,22 @@ share
     UniqueOffChainPoolFetchError poolId fetchTime retryCount
     deriving Show
 
-  OffChainAnchorData
-    votingAnchorId          VotingAnchorId      noreference
-    hash                    ByteString
-    json                    Text                sqltype=jsonb
-    bytes                   ByteString          sqltype=bytea
+  OffChainVoteData
+    votingAnchorId      VotingAnchorId      noreference
+    hash                ByteString
+    json                Text                sqltype=jsonb
+    bytes               ByteString          sqltype=bytea
+    warning             Text Maybe
+    UniqueOffChainVoteData votingAnchorId hash
+    deriving Show
 
-  OffChainAnchorFetchError
-    votingAnchorId          VotingAnchorId      noreference
-    fetchError              Text
-    retryCount              Word                sqltype=word31type
+  OffChainVoteFetchError
+    votingAnchorId      VotingAnchorId      noreference
+    fetchError          Text
+    fetchTime           UTCTime             sqltype=timestamp
+    retryCount          Word                sqltype=word31type
+    UniqueOffChainVoteFetchError votingAnchorId retryCount
+    deriving Show
 
   --------------------------------------------------------------------------
   -- A table containing a managed list of reserved ticker names.
@@ -1223,6 +1234,12 @@ schemaDocs =
       NewCommitteeDeletedMembers # "The removed members of the committee. This is now given in a text as a description, but may change. TODO: Conway."
       NewCommitteeAddedMembers # "The new members of the committee. This is now given in a text as a description, but may change. TODO: Conway."
 
+    Constitution --^ do
+      "A table for constitutiona attached to a GovActionProposal. New in 13.2-Conway."
+      ConstitutionGovActionProposalId # "The GovActionProposal table index for this constitution."
+      ConstitutionVotingAnchorId # "The ConstitutionVotingAnchor table index for this constitution."
+      ConstitutionScriptHash # "The Script Hash. It's associated script may not be already inserted in the script table."
+
     VotingProcedure --^ do
       "A table for voting procedures, aka GovVote. A Vote can be Yes No or Abstain. New in 13.2-Conway."
       VotingProcedureTxId # "The Tx table index of the tx that includes this VotingProcedure."
@@ -1233,18 +1250,20 @@ schemaDocs =
       VotingProcedureVote # "The Vote. Can be one of Yes, No, Abstain."
       VotingProcedureVotingAnchorId # "The VotingAnchor table index associated with this VotingProcedure."
 
-    OffChainAnchorData --^ do
-      "The table with the offchain metadata related to Vote Anchors. New in 13.2-Conway."
-      OffChainAnchorDataVotingAnchorId # "The VotingAnchor table index this offchain data refers."
-      OffChainAnchorDataHash # "The hash of the offchain data."
-      OffChainAnchorDataJson # "The payload as JSON."
-      OffChainAnchorDataBytes # "The raw bytes of the payload."
+    OffChainVoteData --^ do
+      "The table with the offchain metadata related to Vote Anchors. It accepts metadata in a more lenient way than what's\
+      \ decribed in CIP-100. New in 13.2-Conway."
+      OffChainVoteDataVotingAnchorId # "The VotingAnchor table index this offchain data refers."
+      OffChainVoteDataHash # "The hash of the offchain data."
+      OffChainVoteDataJson # "The payload as JSON."
+      OffChainVoteDataBytes # "The raw bytes of the payload."
+      OffChainVoteDataWarning # "A warning that occured while validating the metadata."
 
-    OffChainAnchorFetchError --^ do
+    OffChainVoteFetchError --^ do
       "Errors while fetching or validating offchain Voting Anchor metadata. New in 13.2-Conway."
-      OffChainAnchorFetchErrorVotingAnchorId # "The VotingAnchor table index this offchain fetch error refers."
-      OffChainAnchorFetchErrorFetchError # "The text of the error."
-      OffChainAnchorFetchErrorRetryCount # "The number of retries."
+      OffChainVoteFetchErrorVotingAnchorId # "The VotingAnchor table index this offchain fetch error refers."
+      OffChainVoteFetchErrorFetchError # "The text of the error."
+      OffChainVoteFetchErrorRetryCount # "The number of retries."
 
     DrepDistr --^ do
       "The table for the distribution of voting power per DRep per. Currently this has a single entry per DRep\

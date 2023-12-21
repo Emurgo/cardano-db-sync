@@ -5,8 +5,8 @@ version:                13.2.0.0
 synopsis:               The Cardano DB Sync node
 description:            A Cardano node that follows the Cardano chain and inserts data from the
                         chain into a PostgresQL database.
-homepage:               https://github.com/input-output-hk/cardano-db-sync
-bug-reports:            https://github.com/input-output-hk/cardano-db-sync/issues
+homepage:               https://github.com/IntersectMBO/cardano-db-sync
+bug-reports:            https://github.com/IntersectMBO/cardano-db-sync/issues
 license:                Apache-2.0
 license-file:           LICENSE
 author:                 IOHK Engineering Team
@@ -88,11 +88,6 @@ library
                         Cardano.DbSync.Era.Shelley.Insert
                         Cardano.DbSync.Era.Shelley.Insert.Epoch
                         Cardano.DbSync.Era.Shelley.Insert.Grouped
-                        Cardano.DbSync.Era.Shelley.OffChain
-                        Cardano.DbSync.Era.Shelley.OffChain.FetchQueue
-                        Cardano.DbSync.Era.Shelley.OffChain.Http
-                        Cardano.DbSync.Era.Shelley.OffChain.Query
-                        Cardano.DbSync.Era.Shelley.OffChain.Types
                         Cardano.DbSync.Era.Shelley.Query
                         Cardano.DbSync.Era.Shelley.Validate
 
@@ -119,6 +114,14 @@ library
                         Cardano.DbSync.Fix.EpochStake
                         Cardano.DbSync.Fix.PlutusDataBytes
                         Cardano.DbSync.Fix.PlutusScripts
+
+                        -- OffChain
+                        Cardano.DbSync.OffChain
+                        Cardano.DbSync.OffChain.FetchQueue
+                        Cardano.DbSync.OffChain.Http
+                        Cardano.DbSync.OffChain.Query
+                        Cardano.DbSync.OffChain.Types
+
                         Cardano.DbSync.LocalStateQuery
                         Cardano.DbSync.StateQuery
                         Cardano.DbSync.Sync

@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
-module Cardano.DbSync.Era.Shelley.OffChain.FetchQueue (
+module Cardano.DbSync.OffChain.FetchQueue (
   newRetry,
   retryAgain,
   showRetryTimes,
@@ -28,12 +28,17 @@ retryAgain fetchTime existingRetryCount =
   -- POSIXTime is in seconds.
   Retry
     { retryFetchTime = fetchTime
-    , retryRetryTime = fetchTime + min (24 * 60 * 60) (30 + (5 ^ nextRetryCount) * 60)
+    , retryRetryTime = fetchTime + retryDiff
     , retryCount = nextRetryCount
     }
   where
     nextRetryCount :: Word
     nextRetryCount = 1 + existingRetryCount
+
+    retryDiff =
+      if nextRetryCount >= 5
+        then 24 * 60 * 60
+        else min (24 * 60 * 60) (30 + (2 ^ nextRetryCount) * 60)
 
 -- A nice pretty printer for the retry.
 showRetryTimes :: Retry -> Text

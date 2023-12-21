@@ -19,10 +19,8 @@ module Cardano.DbSync (
   runDbSyncNode,
   runDbSync,
   -- For testing and debugging
-  FetchError (..),
+  OffChainFetchError (..),
   SimplifiedOffChainPoolData (..),
-  httpGetOffChainPoolData,
-  parsePoolUrl,
 ) where
 
 import Cardano.BM.Trace (Trace, logError, logInfo, logWarning)
@@ -30,7 +28,7 @@ import qualified Cardano.Crypto as Crypto
 import Cardano.Db (textShow)
 import qualified Cardano.Db as Db
 import Cardano.DbSync.Api
-import Cardano.DbSync.Api.Types (InsertOptions (..), RunMigration, SyncOptions (..), envLedgerEnv)
+import Cardano.DbSync.Api.Types (InsertOptions (..), RunMigration, SyncEnv (..), SyncOptions (..), envLedgerEnv)
 import Cardano.DbSync.Config (configureLogging, readSyncNodeConfig)
 import Cardano.DbSync.Config.Cardano
 import Cardano.DbSync.Config.Types (
@@ -46,19 +44,14 @@ import Cardano.DbSync.Config.Types (
 import Cardano.DbSync.Database
 import Cardano.DbSync.DbAction
 import Cardano.DbSync.Era
-import Cardano.DbSync.Era.Shelley.OffChain.Http (
-  FetchError (..),
-  SimplifiedOffChainPoolData (..),
-  httpGetOffChainPoolData,
-  parsePoolUrl,
-  spodJson,
- )
 import Cardano.DbSync.Error (SyncNodeError, hasAbortOnPanicEnv, runOrThrowIO)
 import Cardano.DbSync.Ledger.State
+import Cardano.DbSync.OffChain (runFetchOffChainPoolThread, runFetchOffChainVoteThread)
 import Cardano.DbSync.Rollback (unsafeRollback)
 import Cardano.DbSync.Sync (runSyncNodeClient)
 import Cardano.DbSync.Tracing.ToObjectOrphans ()
 import Cardano.DbSync.Types
+import Cardano.DbSync.Util.Constraint (addRewardConstraintsIfNotExist)
 import Cardano.Prelude hiding (Nat, (%))
 import Cardano.Slotting.Slot (EpochNo (..))
 import Control.Concurrent.Async
@@ -115,7 +108,8 @@ runDbSync metricsSetters knownMigrations iomgr trce params aop = do
   (ranMigrations, unofficial) <- if enpForceIndexes params then runMigration Db.Full else runMigration Db.Initial
   unless (null unofficial) $
     logWarning trce $
-      "Unofficial migration scripts found: " <> textShow unofficial
+      "Unofficial migration scripts found: "
+        <> textShow unofficial
 
   if ranMigrations
     then logInfo trce "All migrations were executed"
@@ -169,37 +163,40 @@ runSyncNode metricsSetters trce iomgr dbConnString ranMigrations runMigrationFnc
   logInfo trce $ "Using shelley genesis file from: " <> (show . unGenesisFile $ dncShelleyGenesisFile syncNodeConfig)
   logInfo trce $ "Using alonzo genesis file from: " <> (show . unGenesisFile $ dncAlonzoGenesisFile syncNodeConfig)
   Db.runIohkLogging trce $
-    withPostgresqlConn dbConnString $ \backend -> liftIO $ do
-      runOrThrowIO $ runExceptT $ do
-        genCfg <- readCardanoGenesisConfig syncNodeConfig
-        logProtocolMagicId trce $ genesisProtocolMagicId genCfg
+    withPostgresqlConn dbConnString $
+      \backend -> liftIO $ do
+        runOrThrowIO $ runExceptT $ do
+          genCfg <- readCardanoGenesisConfig syncNodeConfig
+          logProtocolMagicId trce $ genesisProtocolMagicId genCfg
+          syncEnv <-
+            ExceptT $
+              mkSyncEnvFromConfig
+                trce
+                backend
+                dbConnString
+                syncOptions
+                genCfg
+                syncNodeParams
+                ranMigrations
+                runMigrationFnc
+          liftIO $ runReaderT (addRewardConstraintsIfNotExist syncEnv trce) (envBackend syncEnv)
+          liftIO $ runExtraMigrationsMaybe syncEnv
+          unless (enpShouldUseLedger syncNodeParams) $ liftIO $ do
+            logInfo trce "Migrating to a no ledger schema"
+            Db.noLedgerMigrations backend trce
+          insertValidateGenesisDist syncEnv (dncNetworkName syncNodeConfig) genCfg (useShelleyInit syncNodeConfig)
 
-        syncEnv <-
-          ExceptT $
-            mkSyncEnvFromConfig
-              trce
-              backend
-              syncOptions
-              genCfg
-              syncNodeParams
-              ranMigrations
-              runMigrationFnc
-        liftIO $ runExtraMigrationsMaybe syncEnv
-        unless (enpShouldUseLedger syncNodeParams) $ liftIO $ do
-          logInfo trce "Migrating to a no ledger schema"
-          Db.noLedgerMigrations backend trce
-        insertValidateGenesisDist syncEnv (dncNetworkName syncNodeConfig) genCfg (useShelleyInit syncNodeConfig)
-
-        -- communication channel between datalayer thread and chainsync-client thread
-        threadChannels <- liftIO newThreadChannels
-        liftIO $
-          mapConcurrently_
-            id
-            [ runDbThread syncEnv metricsSetters threadChannels
-            , runSyncNodeClient metricsSetters syncEnv iomgr trce threadChannels (enpSocketPath syncNodeParams)
-            , runOffChainFetchThread syncEnv
-            , runLedgerStateWriteThread (getTrace syncEnv) (envLedgerEnv syncEnv)
-            ]
+          -- communication channel between datalayer thread and chainsync-client thread
+          threadChannels <- liftIO newThreadChannels
+          liftIO $
+            mapConcurrently_
+              id
+              [ runDbThread syncEnv metricsSetters threadChannels
+              , runSyncNodeClient metricsSetters syncEnv iomgr trce threadChannels (enpSocketPath syncNodeParams)
+              , runFetchOffChainPoolThread syncEnv
+              , runFetchOffChainVoteThread syncEnv
+              , runLedgerStateWriteThread (getTrace syncEnv) (envLedgerEnv syncEnv)
+              ]
   where
     useShelleyInit :: SyncNodeConfig -> Bool
     useShelleyInit cfg =
@@ -212,8 +209,9 @@ runSyncNode metricsSetters trce iomgr dbConnString ranMigrations runMigrationFnc
 
 logProtocolMagicId :: Trace IO Text -> Crypto.ProtocolMagicId -> ExceptT SyncNodeError IO ()
 logProtocolMagicId tracer pm =
-  liftIO . logInfo tracer $
-    mconcat
+  liftIO
+    . logInfo tracer
+    $ mconcat
       [ "NetworkMagic: "
       , textShow (Crypto.unProtocolMagicId pm)
       ]

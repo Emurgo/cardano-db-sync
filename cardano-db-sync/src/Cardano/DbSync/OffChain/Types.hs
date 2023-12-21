@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
-module Cardano.DbSync.Era.Shelley.OffChain.Types (
+module Cardano.DbSync.OffChain.Types (
   PoolDescription (..),
   PoolHomepage (..),
   PoolOffChainMetadata (..),
@@ -76,7 +76,7 @@ instance ToSchema PoolOffChainMetadata
 
 -- -------------------------------------------------------------------------------------------------
 
--- Copied from https://github.com/input-output-hk/cardano-node/pull/1299
+-- Copied from https://github.com/IntersectMBO/cardano-node/pull/1299
 
 -- | Parse and validate the stake pool metadata name from a JSON object.
 --
