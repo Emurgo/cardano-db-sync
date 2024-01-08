@@ -23,7 +23,6 @@ jobs:
         uses: docker/build-push-action@v4
         with:
           push: true
-          sync_tags: true
           tags: emurgornd/cardano-db-sync:latest,emurgornd/cardano-db-sync:${{ github.ref_name }}
       - name: Build and push SMASH
         uses: docker/build-push-action@v4
