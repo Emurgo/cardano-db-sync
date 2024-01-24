@@ -1,0 +1,14 @@
+name: Sync tags on schedule
+on:
+  schedule:
+    - cron: '0 0 * * *'
+jobs:
+  hello_tags_sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync from upstream to fork
+        uses: chachako/tags-sync@v1
+        with:
+          base-repository: https://github.com/IntersectMBO/cardano-db-sync.git
+          scripts-after-sync: |
+            echo "Hello World!"
