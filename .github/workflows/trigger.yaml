@@ -8,8 +8,8 @@ jobs:
   check-for-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
       - name: checkout
+        uses: actions/checkout@v2
         with:
           fetch-depth: 0
       - name: check for new release
