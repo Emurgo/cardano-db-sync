@@ -13,6 +13,6 @@ jobs:
         with: 
           upstream_repo: https://github.com/IntersectMBO/cardano-db-sync.git
           upstream_branch: master
-          sync_tags: true
+          sync_tags: "true"
           downstream_branch: master
           token: ${{ secrets.WORKFLOW_TOKEN }}
