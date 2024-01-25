@@ -1,16 +1,25 @@
-name: Trigger Release Workflow
+name: Check for New Release
 
 on:
   schedule:
-    - cron: '0 */1 * * *'  # Schedule to run every 1 hour
+    - cron: '*/2 * * * *'  # Schedule to run every 6 hours
 
 jobs:
-  trigger:
+  check-for-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Release Workflow
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.WORKFLOW_TOKEN }}
-          repository: https://github.com/IntersectMBO/cardano-db-sync.git
-          event-type: trigger-release
+      - name: Check for new release
+        run: |
+          latestTag=$(curl -s "https://api.github.com/repos/IntersectMBO/cardano-db-sync/releases/latest" | jq -r '.tag_name')
+
+          if [ "$latestTag" != "$(git describe --tags --abbrev=0)" ]; then
+            echo "New release detected. Triggering release workflow."
+            curl -X POST \
+              -H "Authorization: Bearer ${{ secrets.WORKFLOW_TOKEN }}" \
+              -H "Accept: application/vnd.github.everest-preview+json" \
+              -H "Content-Type: application/json" \
+              https://api.github.com/repos/emurgo/cardano-db-sync/dispatches \
+              --data '{"event_type": "trigger-release"}'
+          else
+            echo "No new release detected."
+          fi
