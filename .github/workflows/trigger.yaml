@@ -2,7 +2,7 @@ name: Trigger Release Workflow
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Schedule to run every 6 hours
+    - cron: '0 */1 * * *'  # Schedule to run every 6 hours
 
 jobs:
   trigger:
