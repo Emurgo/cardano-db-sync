@@ -2,7 +2,7 @@ name: Check for New Release
 
 on:
   schedule:
-    - cron: '* */12 * * *'  # Schedule to run every 6 hours
+    - cron: '*/2 * * * *'  # Schedule to run every 6 hours
 
 jobs:
   check-for-release:
@@ -10,9 +10,13 @@ jobs:
     steps:
       - name: Check for new release
         run: |
-          latestTag=$(curl -s "https://api.github.com/repos/IntersectMBO/cardano-db-sync/releases/latest" | jq -r '.tag_name')
+          upstreamTag=$(curl -s "https://api.github.com/repos/ IntersectMBO/cardano-db-sync/releases/latest" | jq -r '.tag_name')
+          forkedTag=$(git describe --tags --abbrev=0)
 
-          if [ "$latestTag" != "$(git describe --tags --abbrev=0)" ]; then
+          echo "Upstream Tag: $upstreamTag"
+          echo "Forked Tag: $forkedTag"
+
+          if [ "$upstreamTag" != "$forkedTag" ]; then
             echo "New release detected. Triggering release workflow."
             curl -X POST \
               -H "Authorization: Bearer ${{ secrets.WORKFLOW_TOKEN }}" \
