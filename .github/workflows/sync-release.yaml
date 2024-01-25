@@ -11,16 +11,19 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
-        with:
-          fetch-depth: 0
 
       - name: Set up Git
         run: |
           git config user.name "nanuijaz"
           git config user.email "nanuijaz@users.noreply.github.com"
 
+      - name: Get latest release version
+        id: get-latest-release
+        run: |
+          latestTag=$(curl -s "https://api.github.com/repos/IntersecMBO/cardano-db-sync/releases/latest" | jq -r '.tag_name')
+          echo "::set-output name=tag::$latestTag"
+
       - name: Create release in forked repository
         run: |
-          latestTag=$(git describe --tags --abbrev=0)
-          git tag -a "v${latestTag}" -m "Release notes for v${latestTag}"
-          git push origin "v${latestTag}"
+          git tag -a "${{ steps.get-latest-release.outputs.tag }}" -m "Release notes for ${{ steps.get-latest-release.outputs.tag }}"
+          git push origin "${{ steps.get-latest-release.outputs.tag }}"
