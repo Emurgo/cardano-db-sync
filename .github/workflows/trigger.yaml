@@ -1,0 +1,16 @@
+name: Trigger Release Workflow
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Schedule to run every 6 hours
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Release Workflow
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.WORKFLOW_TOKEN }}
+          repository: https://github.com/IntersectMBO/cardano-db-sync.git
+          event-type: trigger-release
