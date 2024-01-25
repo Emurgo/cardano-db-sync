@@ -9,6 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check for new release
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
         run: |
           upstreamTag=$(curl -s "https://api.github.com/repos/IntersectMBO/cardano-db-sync/releases/latest" | jq -r '.tag_name')
           forkedTag=$(git describe --tags --abbrev=0)
