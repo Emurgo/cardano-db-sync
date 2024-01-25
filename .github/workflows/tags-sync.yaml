@@ -1,14 +1,31 @@
-name: Sync tags on schedule
+name: Create Release in Forked Repository
+
 on:
-  schedule:
-    - cron: '0 0 * * *'
+  release:
+    types:
+      - published
+
 jobs:
-  hello_tags_sync:
+  create-release:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Sync from upstream to fork
-        uses: chachako/tags-sync@v1
-        with:
-          base-repository: https://github.com/IntersectMBO/cardano-db-sync.git
-          scripts-after-sync: |
-            echo "Hello World!"
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Git
+        run: |
+          git config user.name "nanuijaz"
+          git config user.email "nanuijaz@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/IntersectMBO/cardano-db-sync
+
+      - name: Fetch upstream changes
+        run: git fetch upstream
+
+      - name: Create release in forked repository
+        run: |
+          latestTag=$(git describe --tags --abbrev=0)
+          git tag -a "v${{ github.event.release.tag_name }}" -m "${{ github.event.release.body }}"
+          git push origin "v${{ github.event.release.tag_name }}"
