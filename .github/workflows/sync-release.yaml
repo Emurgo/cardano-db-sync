@@ -1,0 +1,24 @@
+name: Release Workflow
+
+on:
+  repository_dispatch:
+    types: [trigger-release]
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Git
+        run: |
+          git config user.name "nanuijaz"
+          git config user.email "nanuijaz@users.noreply.github.com"
+
+      - name: Create release in forked repository
+        run: |
+          latestTag=$(git describe --tags --abbrev=0)
+          git tag -a "v${latestTag}" -m "Release notes for v${latestTag}"
+          git push origin "v${latestTag}"
