@@ -22,7 +22,7 @@ jobs:
         run: |
           latestTag=$(curl -s "https://api.github.com/repos/IntersectMBO/cardano-db-sync/releases/latest" | jq -r '.tag_name')
           echo "${latestTag}"
-          echo "RELEASE_TAG={$latestTag}" >> $$GITHUB_ENV
+          echo "RELEASE_TAG=${latestTag}" >> $$GITHUB_ENV
       - name: Create release in forked repository
         run: |
           if [ -n "$RELEASE_TAG" ]; then
