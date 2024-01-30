@@ -32,6 +32,11 @@ jobs:
           if [ -n "${RELEASE_TAG}" ]; then
             git tag -a "${RELEASE_TAG}" -m "Release notes for ${RELEASE_TAG}"
             git push origin "${RELEASE_TAG}"
+            curl -X POST \
+              -H "Authorization: Bearer ${{ secrets.WORKFLOW_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/Emurgo/cardano-db-sync/releases" \
+              -d '{"tag_name": "'"${RELEASE_TAG}"'", "name": "'"${RELEASE_TAG}"'", "body": "Release notes for '"${RELEASE_TAG}"'"}'
           else
             echo "No release tag available. Skipping release creation."
           fi
