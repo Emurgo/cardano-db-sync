@@ -26,7 +26,11 @@ jobs:
 
       - name: Create release in forked repository
         run: |
-          echo "$RELEASE_TAG"
-          git tag -a "$RELEASE_TAG" -m "Release notes for $RELEASE_TAG"
-          git push origin "$RELEASE_TAG"
-
+          if [ -n "$RELEASE_TAG" ]; then
+            git tag -a "$RELEASE_TAG" -m "Release notes for $RELEASE_TAG"
+            git push origin "$RELEASE_TAG"
+          else
+            echo "No release tag available. Skipping release creation."
+          fi
+      - name: Display latest release version
+        run: echo "Latest Release: $RELEASE_TAG"
