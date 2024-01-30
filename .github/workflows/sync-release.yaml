@@ -26,6 +26,5 @@ jobs:
 
       - name: Create release in forked repository
         run: |
-          echo "${ steps.get-latest-release.outputs.latestTag }"
-          git tag -a "${ steps.get-latest-release.outputs.latestTag }" -m "Release notes for ${ steps.get-latest-release.outputs.latestTag }"
-          git push origin "${ steps.get-latest-release.outputs.latestTag }"
+          echo "$steps.get-latest-release.outputs.latestTag"
+
