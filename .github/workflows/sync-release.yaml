@@ -26,7 +26,7 @@ jobs:
           echo "${RELEASE_TAG}"
       - name: Create release in forked repository
         run: |
-          if [ -n "${RELEASE_TAG}" ]; then
+          if [ -n "$RELEASE_TAG" ]; then
             git tag -a "${RELEASE_TAG}" -m "Release notes for ${RELEASE_TAG|"
             git push origin "${RELEASE_TAG}"
           else
