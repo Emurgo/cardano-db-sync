@@ -25,5 +25,5 @@ jobs:
           echo "latestTag={$latestTag}" >> $GITHUB_OUTPUT
 
       - name: Create release in forked repository
-        run: echo "${{ steps.get-latest-release.outputs.latestTag }}"
+        run: echo "${ steps.get-latest-release.outputs.latestTag }"
 
