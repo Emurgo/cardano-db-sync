@@ -197,11 +197,11 @@ insertShelleyBlock syncEnv shouldLog withinTwoMins withinHalfHour blk details is
 
     insertStakeSlice syncEnv $ apStakeSlice applyResult
 
-    when (ioGov iopts)
+    when (ioGov iopts && (withinHalfHour || unBlockNo (Generic.blkBlockNo blk) `mod` 10000 == 0))
       . lift
       $ insertOffChainVoteResults tracer (envOffChainVoteResultQueue syncEnv)
 
-    when (ioOffChainPoolData iopts)
+    when (ioOffChainPoolData iopts && (withinHalfHour || unBlockNo (Generic.blkBlockNo blk) `mod` 10000 == 0))
       . lift
       $ insertOffChainPoolResults tracer (envOffChainPoolResultQueue syncEnv)
   where
@@ -395,7 +395,7 @@ prepareTxOut ::
   (DB.TxId, ByteString) ->
   Generic.TxOut ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) (ExtendedTxOut, [MissingMaTxOut])
-prepareTxOut tracer cache iopts (txId, txHash) (Generic.TxOut index addr addrRaw value maMap mScript dt) = do
+prepareTxOut tracer cache iopts (txId, txHash) (Generic.TxOut index addr value maMap mScript dt) = do
   mSaId <- lift $ insertStakeAddressRefIfMissing tracer cache addr
   mDatumId <-
     whenFalseEmpty (ioPlutusExtra iopts) Nothing $
@@ -410,7 +410,6 @@ prepareTxOut tracer cache iopts (txId, txHash) (Generic.TxOut index addr addrRaw
           { DB.txOutTxId = txId
           , DB.txOutIndex = index
           , DB.txOutAddress = Generic.renderAddress addr
-          , DB.txOutAddressRaw = addrRaw
           , DB.txOutAddressHasScript = hasScript
           , DB.txOutPaymentCred = Generic.maybePaymentCred addr
           , DB.txOutStakeAddressId = mSaId
@@ -434,7 +433,7 @@ insertCollateralTxOut ::
   (DB.TxId, ByteString) ->
   Generic.TxOut ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertCollateralTxOut tracer cache iopts (txId, _txHash) (Generic.TxOut index addr addrRaw value maMap mScript dt) = do
+insertCollateralTxOut tracer cache iopts (txId, _txHash) (Generic.TxOut index addr value maMap mScript dt) = do
   mSaId <- lift $ insertStakeAddressRefIfMissing tracer cache addr
   mDatumId <-
     whenFalseEmpty (ioPlutusExtra iopts) Nothing $
@@ -451,7 +450,6 @@ insertCollateralTxOut tracer cache iopts (txId, _txHash) (Generic.TxOut index ad
         { DB.collateralTxOutTxId = txId
         , DB.collateralTxOutIndex = index
         , DB.collateralTxOutAddress = Generic.renderAddress addr
-        , DB.collateralTxOutAddressRaw = addrRaw
         , DB.collateralTxOutAddressHasScript = hasScript
         , DB.collateralTxOutPaymentCred = Generic.maybePaymentCred addr
         , DB.collateralTxOutStakeAddressId = mSaId
@@ -545,7 +543,7 @@ insertCertificate syncEnv isMember blkId txId epochNo slotNo redeemers (Generic.
         liftIO $
           logWarning tracer "insertCertificate: Unhandled DCertGenesis certificate"
     Right (ConwayTxCertDeleg deleg) ->
-      when (ioShelley iopts) $ insertConwayDelegCert syncEnv txId idx mRedeemerId epochNo slotNo deleg
+      insertConwayDelegCert syncEnv txId idx mRedeemerId epochNo slotNo deleg
     Right (ConwayTxCertPool pool) ->
       when (ioShelley iopts) $ insertPoolCert tracer cache isMember network epochNo blkId txId idx pool
     Right (ConwayTxCertGov c) ->
@@ -689,20 +687,30 @@ insertConwayDelegCert ::
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
 insertConwayDelegCert syncEnv txId idx mRedeemerId epochNo slotNo dCert =
   case dCert of
-    ConwayRegCert cred _dep -> insertStakeRegistration epochNo txId idx $ Generic.annotateStakingCred network cred
-    ConwayUnRegCert cred _dep -> insertStakeDeregistration cache network epochNo txId idx mRedeemerId cred
+    ConwayRegCert cred _dep ->
+      when (ioShelley iopts) $
+        insertStakeRegistration epochNo txId idx $
+          Generic.annotateStakingCred network cred
+    ConwayUnRegCert cred _dep ->
+      when (ioShelley iopts) $
+        insertStakeDeregistration cache network epochNo txId idx mRedeemerId cred
     ConwayDelegCert cred delegatee -> insertDeleg cred delegatee
     ConwayRegDelegCert cred delegatee _dep -> do
-      insertStakeRegistration epochNo txId idx $ Generic.annotateStakingCred network cred
+      when (ioShelley iopts) $
+        insertStakeRegistration epochNo txId idx $
+          Generic.annotateStakingCred network cred
       insertDeleg cred delegatee
   where
     insertDeleg cred = \case
-      DelegStake poolkh -> insertDelegation trce cache network epochNo slotNo txId idx mRedeemerId cred poolkh
+      DelegStake poolkh ->
+        when (ioShelley iopts) $
+          insertDelegation trce cache network epochNo slotNo txId idx mRedeemerId cred poolkh
       DelegVote drep ->
         when (ioGov iopts) $
           insertDelegationVote cache network txId idx cred drep
       DelegStakeVote poolkh drep -> do
-        insertDelegation trce cache network epochNo slotNo txId idx mRedeemerId cred poolkh
+        when (ioShelley iopts) $
+          insertDelegation trce cache network epochNo slotNo txId idx mRedeemerId cred poolkh
         when (ioGov iopts) $
           insertDelegationVote cache network txId idx cred drep
 
@@ -1543,7 +1551,7 @@ insertGovActionProposal cache blkId txId govExpiresAt (index, pp) = do
       void . DB.insertNewCommittee $
         DB.NewCommittee
           { DB.newCommitteeGovActionProposalId = gaId
-          , DB.newCommitteeQuorumNominator = fromIntegral $ numerator r
+          , DB.newCommitteeQuorumNumerator = fromIntegral $ numerator r
           , DB.newCommitteeQuorumDenominator = fromIntegral $ denominator r
           , DB.newCommitteeDeletedMembers = textShow removed
           , DB.newCommitteeAddedMembers = textShow added

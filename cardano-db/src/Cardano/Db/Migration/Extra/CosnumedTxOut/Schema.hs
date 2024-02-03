@@ -26,7 +26,6 @@ import Cardano.Db.Types (
   DbInt65,
   DbLovelace,
   DbWord64,
-  RewardSource,
   ScriptPurpose,
   ScriptType,
   SyncState,
@@ -140,7 +139,6 @@ share
     txId                TxId                noreference
     index               Word64              sqltype=txindex
     address             Text
-    addressRaw          ByteString
     addressHasScript    Bool
     paymentCred         ByteString Maybe    sqltype=hash28type
     stakeAddressId      StakeAddressId Maybe noreference
@@ -155,7 +153,6 @@ share
     txId                TxId                noreference     -- This type is the primary key for the 'tx' table.
     index               Word64              sqltype=txindex
     address             Text
-    addressRaw          ByteString
     addressHasScript    Bool
     paymentCred         ByteString Maybe    sqltype=hash28type
     stakeAddressId      StakeAddressId Maybe noreference
@@ -291,24 +288,6 @@ share
     txId                TxId                noreference
 
   -- -----------------------------------------------------------------------------------------------
-  -- Reward, Stake and Treasury need to be obtained from the ledger state.
-
-  -- The reward for each stake address and. This is not a balance, but a reward amount and the
-  -- epoch in which the reward was earned.
-  -- This table should never get rolled back.
-  Reward
-    addrId              StakeAddressId      noreference
-    type                RewardSource        sqltype=rewardtype
-    amount              DbLovelace          sqltype=lovelace
-    earnedEpoch         Word64
-    spendableEpoch      Word64
-    poolId              PoolHashId Maybe    noreference
-    -- Usually NULLables are not allowed in a uniqueness constraint. The semantics of how NULL
-    -- interacts with those constraints is non-trivial:  two NULL values are not considered equal
-    -- for the purposes of an uniqueness constraint.
-    -- Use of "!force" attribute on the end of the line disables this check.
-    UniqueReward        addrId type earnedEpoch poolId !force
-    deriving Show
 
   Withdrawal
     addrId              StakeAddressId      noreference
@@ -600,7 +579,6 @@ schemaDocs =
       TxOutTxId # "The Tx table index of the transaction that contains this transaction output."
       TxOutIndex # "The index of this transaction output with the transaction."
       TxOutAddress # "The human readable encoding of the output address. Will be Base58 for Byron era addresses and Bech32 for Shelley era."
-      TxOutAddressRaw # "The raw binary address."
       TxOutAddressHasScript # "Flag which shows if this address is locked by a script."
       TxOutPaymentCred # "The payment credential part of the Shelley address. (NULL for Byron addresses). For a script-locked address, this is the script hash."
       TxOutStakeAddressId # "The StakeAddress table index for the stake address part of the Shelley address. (NULL for Byron addresses)."
@@ -614,7 +592,6 @@ schemaDocs =
       CollateralTxOutTxId # "The Tx table index of the transaction that contains this transaction output."
       CollateralTxOutIndex # "The index of this transaction output with the transaction."
       CollateralTxOutAddress # "The human readable encoding of the output address. Will be Base58 for Byron era addresses and Bech32 for Shelley era."
-      CollateralTxOutAddressRaw # "The raw binary address."
       CollateralTxOutAddressHasScript # "Flag which shows if this address is locked by a script."
       CollateralTxOutPaymentCred # "The payment credential part of the Shelley address. (NULL for Byron addresses). For a script-locked address, this is the script hash."
       CollateralTxOutStakeAddressId # "The StakeAddress table index for the stake address part of the Shelley address. (NULL for Byron addresses)."
@@ -743,21 +720,6 @@ schemaDocs =
       TxMetadataJson # "The JSON payload if it can be decoded as JSON."
       TxMetadataBytes # "The raw bytes of the payload."
       TxMetadataTxId # "The Tx table index of the transaction where this metadata was included."
-
-    Reward --^ do
-      "A table for earned rewards. It includes 5 types of rewards. The rewards are inserted incrementally and\
-      \ this procedure is finalised when the spendable epoch comes. Before the epoch comes, some entries\
-      \ may be missing."
-      RewardAddrId # "The StakeAddress table index for the stake address that earned the reward."
-      RewardType # "The source of the rewards; pool `member`, pool `leader`, `treasury` or `reserves` payment and pool deposits `refunds`"
-      RewardAmount # "The reward amount (in Lovelace)."
-      RewardEarnedEpoch
-        # "The epoch in which the reward was earned. For `pool` and `leader` rewards spendable in epoch `N`, this will be\
-          \ `N - 2`, for `treasury` and `reserves` `N - 1` and for `refund` N."
-      RewardSpendableEpoch # "The epoch in which the reward is actually distributed and can be spent."
-      RewardPoolId
-        # "The PoolHash table index for the pool the stake address was delegated to when\
-          \ the reward is earned or for the pool that there is a deposit refund. Will be NULL for payments from the treasury or the reserves."
 
     Withdrawal --^ do
       "A table for withdrawals from a reward account."

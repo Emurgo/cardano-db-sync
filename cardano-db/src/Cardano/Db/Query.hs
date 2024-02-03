@@ -21,7 +21,6 @@ module Cardano.Db.Query (
   queryCalcEpochEntry,
   queryCurrentEpochNo,
   queryNormalEpochRewardCount,
-  queryNullPoolRewardExists,
   queryGenesis,
   queryGenesisSupply,
   queryShelleyGenesisSupply,
@@ -90,6 +89,7 @@ module Cardano.Db.Query (
   -- queries used only in tests
   queryAddressOutputs,
   queryRewardCount,
+  queryInstantRewardCount,
   queryTxInCount,
   queryEpochCount,
   queryCostModel,
@@ -428,17 +428,6 @@ queryNormalEpochRewardCount epochNum = do
     where_ (rwd ^. RewardType `in_` valList [RwdMember, RwdLeader])
     pure countRows
   pure $ maybe 0 unValue (listToMaybe res)
-
-queryNullPoolRewardExists :: MonadIO m => Reward -> ReaderT SqlBackend m Bool
-queryNullPoolRewardExists newRwd = do
-  res <- select $ do
-    rwd <- from $ table @Reward
-    where_ (rwd ^. RewardAddrId ==. val (rewardAddrId newRwd))
-    where_ (rwd ^. RewardType ==. val (rewardType newRwd))
-    where_ (rwd ^. RewardEarnedEpoch ==. val (rewardEarnedEpoch newRwd))
-    limit 1
-    pure (rwd ^. RewardId)
-  pure $ not (null res)
 
 queryGenesis :: MonadIO m => ReaderT SqlBackend m (Either LookupFail BlockId)
 queryGenesis = do
@@ -1192,11 +1181,11 @@ queryAddressBalanceAtSlot addr slotNo = do
   Queries use in tests
 ------------------------}
 
-queryAddressOutputs :: MonadIO m => ByteString -> ReaderT SqlBackend m DbLovelace
+queryAddressOutputs :: MonadIO m => Text -> ReaderT SqlBackend m DbLovelace
 queryAddressOutputs addr = do
   res <- select $ do
     txout <- from $ table @TxOut
-    where_ (txout ^. TxOutAddressRaw ==. val addr)
+    where_ (txout ^. TxOutAddress ==. val addr)
     pure $ sum_ (txout ^. TxOutValue)
   pure $ convert (listToMaybe res)
   where
@@ -1208,6 +1197,13 @@ queryRewardCount :: MonadIO m => ReaderT SqlBackend m Word64
 queryRewardCount = do
   res <- select $ do
     _ <- from $ table @Reward
+    pure countRows
+  pure $ maybe 0 unValue (listToMaybe res)
+
+queryInstantRewardCount :: MonadIO m => ReaderT SqlBackend m Word64
+queryInstantRewardCount = do
+  res <- select $ do
+    _ <- from $ table @InstantReward
     pure countRows
   pure $ maybe 0 unValue (listToMaybe res)
 

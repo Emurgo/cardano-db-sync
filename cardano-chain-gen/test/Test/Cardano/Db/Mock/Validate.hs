@@ -14,6 +14,7 @@ module Test.Cardano.Db.Mock.Validate (
   assertTxInCount,
   assertUnspentTx,
   assertRewardCount,
+  assertInstantRewardCount,
   assertBlockNoBackoff,
   assertBlockNoBackoffTimes,
   assertEqQuery,
@@ -42,6 +43,7 @@ module Test.Cardano.Db.Mock.Validate (
 
 import Cardano.Db
 import qualified Cardano.Db as DB
+import qualified Cardano.DbSync.Era.Shelley.Generic as Generic
 import Cardano.DbSync.Era.Shelley.Generic.Util
 import qualified Cardano.Ledger.Address as Ledger
 import Cardano.Ledger.BaseTypes
@@ -78,7 +80,7 @@ import Database.Esqueleto.Legacy (
   (==.),
   (^.),
  )
-import Database.Persist.Sql (Entity, SqlBackend, entityVal)
+import Database.Persist.Sql (Entity, SqlBackend)
 import Database.PostgreSQL.Simple (SqlError (..))
 import Ouroboros.Consensus.Cardano.Block
 import Ouroboros.Consensus.Shelley.Ledger (ShelleyBlock)
@@ -110,6 +112,10 @@ assertTxInCount env n = do
 assertRewardCount :: DBSyncEnv -> Word64 -> IO ()
 assertRewardCount env n =
   assertEqBackoff env queryRewardCount n defaultDelays "Unexpected rewards count"
+
+assertInstantRewardCount :: DBSyncEnv -> Word64 -> IO ()
+assertInstantRewardCount env n =
+  assertEqBackoff env queryInstantRewardCount n defaultDelays "Unexpected instant rewards count"
 
 assertBlockNoBackoff :: DBSyncEnv -> Int -> IO ()
 assertBlockNoBackoff = assertBlockNoBackoffTimes defaultDelays
@@ -197,8 +203,8 @@ assertAddrValues ::
   IO ()
 assertAddrValues env ix expected sta = do
   addr <- assertRight $ resolveAddress ix sta
-  let addrBs = Ledger.serialiseAddr addr
-      q = queryAddressOutputs addrBs
+  let address = Generic.renderAddress addr
+      q = queryAddressOutputs address
   assertEqBackoff env q expected defaultDelays "Unexpected Balance"
 
 assertRight :: Show err => Either err a -> IO a
@@ -241,7 +247,7 @@ assertRewardCounts env st filterAddr mEpoch expected = do
     expectedMap :: Map ByteString (Word64, Word64, Word64, Word64, Word64)
     expectedMap = Map.fromList $ fmap (first mkDBStakeAddress) expected
 
-    groupByAddress :: [(Reward, ByteString)] -> Map ByteString (Word64, Word64, Word64, Word64, Word64)
+    groupByAddress :: [(RewardSource, ByteString)] -> Map ByteString (Word64, Word64, Word64, Word64, Word64)
     groupByAddress rewards =
       let res = foldr updateMap Map.empty rewards
        in if filterAddr
@@ -254,17 +260,17 @@ assertRewardCounts env st filterAddr mEpoch expected = do
       Right cred -> Ledger.serialiseRewardAcnt $ Ledger.RewardAcnt Testnet cred
 
     updateAddrCounters ::
-      Reward ->
+      RewardSource ->
       Maybe (Word64, Word64, Word64, Word64, Word64) ->
       (Word64, Word64, Word64, Word64, Word64)
-    updateAddrCounters reward Nothing = updateCounters reward (0, 0, 0, 0, 0)
-    updateAddrCounters reward (Just cs) = updateCounters reward cs
+    updateAddrCounters rs Nothing = updateCounters rs (0, 0, 0, 0, 0)
+    updateAddrCounters rs (Just cs) = updateCounters rs cs
 
     updateCounters ::
-      Reward ->
+      RewardSource ->
       (Word64, Word64, Word64, Word64, Word64) ->
       (Word64, Word64, Word64, Word64, Word64)
-    updateCounters reward (a, b, c, d, e) = case rewardType reward of
+    updateCounters rs (a, b, c, d, e) = case rs of
       RwdLeader -> (a + 1, b, c, d, e)
       RwdMember -> (a, b + 1, c, d, e)
       RwdReserves -> (a, b, c + 1, d, e)
@@ -272,21 +278,28 @@ assertRewardCounts env st filterAddr mEpoch expected = do
       RwdDepositRefund -> (a, b, c, d, e + 1)
 
     updateMap ::
-      (Reward, ByteString) ->
+      (RewardSource, ByteString) ->
       Map ByteString (Word64, Word64, Word64, Word64, Word64) ->
       Map ByteString (Word64, Word64, Word64, Word64, Word64)
-    updateMap (rew, addr) = Map.alter (Just . updateAddrCounters rew) addr
+    updateMap (rs, addr) = Map.alter (Just . updateAddrCounters rs) addr
 
     filterEpoch rw = case mEpoch of
       Nothing -> val True
       Just e -> rw ^. RewardSpendableEpoch ==. val e
+    filterEpoch' rw = case mEpoch of
+      Nothing -> val True
+      Just e -> rw ^. InstantRewardSpendableEpoch ==. val e
 
     q = do
-      res <- select . from $ \(reward `InnerJoin` stake_addr) -> do
+      res1 <- select . from $ \(reward `InnerJoin` stake_addr) -> do
         on (reward ^. RewardAddrId ==. stake_addr ^. StakeAddressId)
         where_ (filterEpoch reward)
-        pure (reward, stake_addr ^. StakeAddressHashRaw)
-      pure $ fmap (bimap entityVal unValue) res
+        pure (reward ^. RewardType, stake_addr ^. StakeAddressHashRaw)
+      res2 <- select . from $ \(ireward `InnerJoin` stake_addr) -> do
+        on (ireward ^. InstantRewardAddrId ==. stake_addr ^. StakeAddressId)
+        where_ (filterEpoch' ireward)
+        pure (ireward ^. InstantRewardType, stake_addr ^. StakeAddressHashRaw)
+      pure $ fmap (bimap unValue unValue) (res1 <> res2)
 
 assertEpochStake :: DBSyncEnv -> Word64 -> IO ()
 assertEpochStake env expected =
