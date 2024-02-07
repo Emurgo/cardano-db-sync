@@ -53,9 +53,15 @@ RUN mkdir secp256k1-sources && cd secp256k1-sources && git clone https://github.
 ENV LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH" \
     PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
 ARG VERSION
-RUN echo "Building tags/$VERSION..." 
-RUN cd /home/cardano/cardano-db-sync \
-    && touch cabal.project.local \
+RUN echo "Building tags/$VERSION..."
+RUN ls /home
+RUN echo tags/$VERSION > CARDANO_BRANCH \
+    && git clone https://github.com/input-output-hk/cardano-db-sync.git \
+    && cd cardano-db-sync \
+    && git fetch --all --recurse-submodules --tags \
+    && git tag \
+    && git checkout tags/$VERSION
+RUN cd cardano-db-sync \
     && echo "with-compiler: ghc-8.10.7" >> cabal.project.local \
     && cabal update
 RUN cd cardano-db-sync \
@@ -69,13 +75,22 @@ COPY --from=build /root/.local/bin/ /bin/
 COPY --from=build /usr/local/lib/ /lib/
 RUN apt-get update && apt-get install git postgresql libpq-dev libghc-postgresql-libpq-dev -y
 RUN git clone https://github.com/supranational/blst && cd blst && git checkout v0.3.10 && ./build.sh && echo cHJlZml4PS91c3IKZXhlY19wcmVmaXg9JHtwcmVmaXh9CmxpYmRpcj0ke2V4ZWNfcHJlZml4fS9saWIKaW5jbHVkZWRpcj0ke3ByZWZpeH0vaW5jbHVkZQoKTmFtZTogbGliYmxzdApEZXNjcmlwdGlvbjogTXVsdGlsaW5ndWFsIEJMUzEyLTM4MSBzaWduYXR1cmUgbGlicmFyeQpVUkw6IGh0dHBzOi8vZ2l0aHViLmNvbS9zdXByYW5hdGlvbmFsL2Jsc3QKVmVyc2lvbjogMC4zLjEwCkNmbGFnczogLUkke2luY2x1ZGVkaXJ9CkxpYnM6IC1MJHtsaWJkaXJ9IC1sYmxzdA== | base64 --decode >> libblst.pc && cp libblst.pc /usr/lib/pkgconfig/ && cp bindings/blst_aux.h bindings/blst.h bindings/blst.hpp  /usr/include/ && cp libblst.a /usr/lib && chmod u=rw,go=r /usr/lib/libblst.a && chmod u=rw,go=r /usr/lib/pkgconfig/libblst.pc && chmod u=rw,go=r /usr/include/blst.h && chmod u=rw,go=r /usr/include/blst.hpp && chmod u=rw,go=r /usr/include/blst_aux.h
+
 ARG VERSION
 RUN mkdir /home/cardano
 RUN cd /home/cardano  \
-    && git clone https://github.com/input-output-hk/cardano-db-sync.git 
+    && git clone https://github.com/input-output-hk/cardano-db-sync.git \
+    && cd cardano-db-sync \
+    && git fetch --all --recurse-submodules --tags \
+    && git tag \
+    && git checkout tags/$VERSION
 ARG NODE_VERSION
 RUN cd /home/cardano  \
-    && git clone https://github.com/input-output-hk/cardano-node.git 
+    && git clone https://github.com/input-output-hk/cardano-node.git \
+    && cd cardano-node \
+    && git fetch --all --recurse-submodules --tags \
+    && git tag \
+    && git checkout tags/$NODE_VERSION
 RUN apt-get install -y automake build-essential pkg-config libffi-dev libgmp-dev libssl-dev libtinfo-dev libsystemd-dev zlib1g-dev make g++ tmux git jq wget libncursesw5 libtool autoconf libsqlite3-dev m4 ca-certificates gcc libc6-dev curl gawk
 RUN git clone https://github.com/input-output-hk/libsodium && cd libsodium && git checkout $(curl -L https://github.com/input-output-hk/iohk-nix/releases/latest/download/INFO | awk '$1 == "debian.libsodium-vrf.deb" { rev = gensub(/.*-(.*)\.deb/, "\\1", "g", $2); print rev }') && ./autogen.sh && ./configure && make && make check && make install
 RUN mkdir secp256k1-sources && cd secp256k1-sources && git clone https://github.com/bitcoin-core/secp256k1.git && cd secp256k1 && git checkout $(curl -L https://github.com/input-output-hk/iohk-nix/releases/latest/download/INFO | awk '$1 == "debian.libsecp256k1.deb" { rev = gensub(/.*-(.*)\.deb/, "\\1", "g", $2); print rev }') && ./autogen.sh && ./configure --prefix=/usr --enable-module-schnorrsig --enable-experimental && make && make check && make install
