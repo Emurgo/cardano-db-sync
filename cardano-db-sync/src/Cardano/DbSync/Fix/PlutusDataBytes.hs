@@ -23,9 +23,11 @@ import Cardano.DbSync.Types
 import qualified Cardano.Ledger.Alonzo.Tx as Alonzo
 import qualified Cardano.Ledger.Alonzo.TxWits as Alonzo
 import qualified Cardano.Ledger.Babbage.TxBody as Babbage
+import Cardano.Ledger.Babbage.TxOut
 import qualified Cardano.Ledger.Core as Core
 import qualified Cardano.Ledger.Era as Ledger
 import qualified Cardano.Ledger.Plutus.Data as Alonzo
+import qualified Cardano.Ledger.Plutus.Data as Plutus
 import Cardano.Prelude (mapMaybe)
 import Cardano.Slotting.Slot (SlotNo (..))
 import Control.Monad (filterM, when)
@@ -273,9 +275,9 @@ scrapDatumsTxBabbage tx =
     outputData = mapMaybe getDatumOutput $ toList $ Babbage.outputs' txBody
     collOutputData = mapMaybe getDatumOutput $ toList $ Babbage.collateralReturn' txBody
 
-    getDatumOutput :: Babbage.BabbageTxOut StandardBabbage -> Maybe PlutusData
-    getDatumOutput txOut = case txOut ^. Babbage.datumTxOutL of
-      Babbage.Datum binaryData ->
+    getDatumOutput :: BabbageTxOut StandardBabbage -> Maybe PlutusData
+    getDatumOutput txOut = case txOut ^. datumTxOutL of
+      Plutus.Datum binaryData ->
         let plutusData = Alonzo.binaryDataToData binaryData
          in Just $ mkTxData (Alonzo.hashData plutusData, plutusData)
       _ -> Nothing
@@ -289,7 +291,7 @@ scrapDatumsTxAlonzo tx =
 
 scrapRedeemerDataBlock :: CardanoBlock -> Map ByteString ByteString
 scrapRedeemerDataBlock cblk = case cblk of
-  BlockConway _blk -> mempty -- panic "TODO: Conway 5"
+  BlockConway _blk -> mempty
   BlockBabbage blk -> Map.unions $ scrapRedeemerDataTx . snd <$> getTxs blk
   BlockAlonzo blk -> Map.unions $ scrapRedeemerDataTx . snd <$> getTxs blk
   BlockByron _ -> error "No RedeemerData in Byron"

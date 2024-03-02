@@ -203,6 +203,7 @@ test-suite cardano-chain-gen
                       , text
                       , transformers
                       , transformers-except
+                      , tree-diff
                       , tasty-hunit
                       , monad-logger
                       , ouroboros-consensus
@@ -212,4 +213,4 @@ test-suite cardano-chain-gen
                       , persistent-postgresql
                       , postgresql-simple
                       , QuickCheck
-                      , quickcheck-state-machine
+                      , quickcheck-state-machine:no-vendored-treediff
