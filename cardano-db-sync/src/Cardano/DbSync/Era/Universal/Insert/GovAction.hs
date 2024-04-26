@@ -17,6 +17,7 @@ module Cardano.DbSync.Era.Universal.Insert.GovAction (
   insertGovActionProposal,
   insertParamProposal,
   insertVotingProcedures,
+  insertCommitteeHash,
   insertVotingAnchor,
   resolveGovActionProposal,
   updateEnacted,
@@ -34,6 +35,7 @@ import Cardano.DbSync.Era.Shelley.Generic.ParamProposal
 import Cardano.DbSync.Era.Universal.Insert.Other (toDouble)
 import Cardano.DbSync.Era.Util (liftLookupFail)
 import Cardano.DbSync.Error
+import Cardano.DbSync.Ledger.Types
 import Cardano.DbSync.Util
 import Cardano.DbSync.Util.Bech32 (serialiseDrepToBech32)
 import Cardano.Ledger.BaseTypes
@@ -62,17 +64,19 @@ import Lens.Micro ((^.))
 import Ouroboros.Consensus.Cardano.Block (StandardConway, StandardCrypto)
 
 insertGovActionProposal ::
+  forall m.
   (MonadIO m, MonadBaseControl IO m) =>
   Cache ->
   DB.BlockId ->
   DB.TxId ->
   Maybe EpochNo ->
+  Maybe (StrictMaybe (Committee StandardConway)) ->
   (Word64, ProposalProcedure StandardConway) ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertGovActionProposal cache blkId txId govExpiresAt (index, pp) = do
+insertGovActionProposal cache blkId txId govExpiresAt mmCommittee (index, pp) = do
   addrId <-
     lift $ queryOrInsertRewardAccount cache CacheNew $ pProcReturnAddr pp
-  votingAnchorId <- lift $ insertAnchor txId $ pProcAnchor pp
+  votingAnchorId <- lift $ insertVotingAnchor txId DB.GovActionAnchor $ pProcAnchor pp
   mParamProposalId <- lift $
     case pProcGovAction pp of
       ParameterChange _ pparams _ ->
@@ -124,17 +128,39 @@ insertGovActionProposal cache blkId txId govExpiresAt (index, pp) = do
           , DB.treasuryWithdrawalAmount = Generic.coinToDbLovelace coin
           }
 
-    insertNewCommittee gaId removed added q = do
-      void . DB.insertNewCommittee $
-        DB.NewCommittee
-          { DB.newCommitteeGovActionProposalId = gaId
-          , DB.newCommitteeQuorumNumerator = fromIntegral $ numerator r
-          , DB.newCommitteeQuorumDenominator = fromIntegral $ denominator r
-          , DB.newCommitteeDeletedMembers = textShow removed
-          , DB.newCommitteeAddedMembers = textShow added
+    insertNewCommittee ::
+      DB.GovActionProposalId ->
+      Set (Ledger.Credential 'ColdCommitteeRole StandardCrypto) ->
+      Map (Ledger.Credential 'ColdCommitteeRole StandardCrypto) EpochNo ->
+      UnitInterval ->
+      ReaderT SqlBackend m ()
+    insertNewCommittee gapId removed added q = do
+      insertNewCommitteeInfo gapId q
+      insertMembers gapId removed added q
+
+    insertNewCommitteeInfo gapId q =
+      void . DB.insertNewCommitteeInfo $
+        DB.NewCommitteeInfo
+          { DB.newCommitteeInfoGovActionProposalId = gapId
+          , DB.newCommitteeInfoQuorumNumerator = fromIntegral $ numerator r
+          , DB.newCommitteeInfoQuorumDenominator = fromIntegral $ denominator r
           }
       where
         r = unboundRational q -- TODO work directly with Ratio Word64. This is not currently supported in ledger
+    insertMembers gapId removed added q = do
+      whenJust mmCommittee $ \mCommittee -> do
+        -- Nothing means we're not in Conway so it can't happen.
+        let committee = updatedCommittee removed added q mCommittee
+        mapM_ (insertNewMember gapId) (Map.toList $ committeeMembers committee)
+
+    insertNewMember gapId (cred, e) = do
+      chId <- insertCommitteeHash cred
+      void . DB.insertNewCommitteeMember $
+        DB.NewCommitteeMember
+          { DB.newCommitteeMemberGovActionProposalId = gapId
+          , DB.newCommitteeMemberCommitteeHashId = chId
+          , DB.newCommitteeMemberExpirationEpoch = unEpochNo e
+          }
 
 --------------------------------------------------------------------------------------
 -- PROPOSAL
@@ -201,6 +227,7 @@ insertParamProposal blkId txId pp = do
       , DB.paramProposalPvtCommitteeNormal = toDouble . pvtCommitteeNormal <$> pppPoolVotingThresholds pp
       , DB.paramProposalPvtCommitteeNoConfidence = toDouble . pvtCommitteeNoConfidence <$> pppPoolVotingThresholds pp
       , DB.paramProposalPvtHardForkInitiation = toDouble . pvtHardForkInitiation <$> pppPoolVotingThresholds pp
+      , DB.paramProposalPvtppSecurityGroup = toDouble . pvtPPSecurityGroup <$> pppPoolVotingThresholds pp
       , DB.paramProposalDvtMotionNoConfidence = toDouble . dvtMotionNoConfidence <$> pppDRepVotingThresholds pp
       , DB.paramProposalDvtCommitteeNormal = toDouble . dvtCommitteeNormal <$> pppDRepVotingThresholds pp
       , DB.paramProposalDvtCommitteeNoConfidence = toDouble . dvtCommitteeNoConfidence <$> pppDRepVotingThresholds pp
@@ -221,7 +248,7 @@ insertParamProposal blkId txId pp = do
 
 insertConstitution :: (MonadIO m, MonadBaseControl IO m) => DB.TxId -> DB.GovActionProposalId -> Constitution StandardConway -> ReaderT SqlBackend m ()
 insertConstitution txId gapId constitution = do
-  votingAnchorId <- insertVotingAnchor txId $ constitutionAnchor constitution
+  votingAnchorId <- insertVotingAnchor txId DB.OtherAnchor $ constitutionAnchor constitution
   void . DB.insertConstitution $
     DB.Constitution
       { DB.constitutionGovActionProposalId = gapId
@@ -252,10 +279,11 @@ insertVotingProcedure ::
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
 insertVotingProcedure trce cache txId voter (index, (gaId, vp)) = do
   govActionId <- resolveGovActionProposal gaId
-  votingAnchorId <- whenMaybe (strictMaybeToMaybe $ vProcAnchor vp) $ lift . insertVotingAnchor txId
-  (mCommitteeVoter, mDRepVoter, mStakePoolVoter) <- case voter of
-    CommitteeVoter cred ->
-      pure (Just $ Generic.unCredentialHash cred, Nothing, Nothing)
+  votingAnchorId <- whenMaybe (strictMaybeToMaybe $ vProcAnchor vp) $ lift . insertVotingAnchor txId DB.OtherAnchor
+  (mCommitteeVoterId, mDRepVoter, mStakePoolVoter) <- case voter of
+    CommitteeVoter cred -> do
+      khId <- lift $ insertCommitteeHash cred
+      pure (Just khId, Nothing, Nothing)
     DRepVoter cred -> do
       drep <- lift $ insertCredDrepHash cred
       pure (Nothing, Just drep, Nothing)
@@ -269,7 +297,7 @@ insertVotingProcedure trce cache txId voter (index, (gaId, vp)) = do
       { DB.votingProcedureTxId = txId
       , DB.votingProcedureIndex = index
       , DB.votingProcedureGovActionProposalId = govActionId
-      , DB.votingProcedureCommitteeVoter = mCommitteeVoter
+      , DB.votingProcedureCommitteeVoter = mCommitteeVoterId
       , DB.votingProcedureDrepVoter = mDRepVoter
       , DB.votingProcedurePoolVoter = mStakePoolVoter
       , DB.votingProcedureVoterRole = Generic.toVoterRole voter
@@ -277,22 +305,22 @@ insertVotingProcedure trce cache txId voter (index, (gaId, vp)) = do
       , DB.votingProcedureVotingAnchorId = votingAnchorId
       }
 
-insertVotingAnchor :: (MonadIO m, MonadBaseControl IO m) => DB.TxId -> Anchor StandardCrypto -> ReaderT SqlBackend m DB.VotingAnchorId
-insertVotingAnchor txId anchor =
+insertVotingAnchor :: (MonadIO m, MonadBaseControl IO m) => DB.TxId -> DB.AnchorType -> Anchor StandardCrypto -> ReaderT SqlBackend m DB.VotingAnchorId
+insertVotingAnchor txId anchorType anchor =
   DB.insertAnchor $
     DB.VotingAnchor
       { DB.votingAnchorTxId = txId
       , DB.votingAnchorUrl = DB.VoteUrl $ Ledger.urlToText $ anchorUrl anchor -- TODO: Conway check unicode and size of URL
       , DB.votingAnchorDataHash = Generic.safeHashToByteString $ anchorDataHash anchor
+      , DB.votingAnchorType = anchorType
       }
 
-insertAnchor :: (MonadIO m, MonadBaseControl IO m) => DB.TxId -> Anchor StandardCrypto -> ReaderT SqlBackend m DB.VotingAnchorId
-insertAnchor txId anchor =
-  DB.insertAnchor $
-    DB.VotingAnchor
-      { DB.votingAnchorTxId = txId
-      , DB.votingAnchorUrl = DB.VoteUrl $ Ledger.urlToText $ anchorUrl anchor -- TODO: Conway check unicode and size of URL
-      , DB.votingAnchorDataHash = Generic.safeHashToByteString $ anchorDataHash anchor
+insertCommitteeHash :: (MonadBaseControl IO m, MonadIO m) => Ledger.Credential kr StandardCrypto -> ReaderT SqlBackend m DB.CommitteeHashId
+insertCommitteeHash cred = do
+  DB.insertCommitteeHash
+    DB.CommitteeHash
+      { DB.committeeHashRaw = Generic.unCredentialHash cred
+      , DB.committeeHashHasScript = Generic.hasCredScript cred
       }
 
 --------------------------------------------------------------------------------------

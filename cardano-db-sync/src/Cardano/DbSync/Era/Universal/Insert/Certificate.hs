@@ -35,7 +35,7 @@ import Cardano.DbSync.Cache (
  )
 import Cardano.DbSync.Cache.Types (Cache (..), CacheNew (..))
 import qualified Cardano.DbSync.Era.Shelley.Generic as Generic
-import Cardano.DbSync.Era.Universal.Insert.GovAction (insertCredDrepHash, insertDrep, insertVotingAnchor)
+import Cardano.DbSync.Era.Universal.Insert.GovAction (insertCommitteeHash, insertCredDrepHash, insertDrep, insertVotingAnchor)
 import Cardano.DbSync.Era.Universal.Insert.Pool (IsPoolMember, insertPoolCert)
 import Cardano.DbSync.Error
 import Cardano.DbSync.Types
@@ -243,7 +243,7 @@ insertDrepRegistration ::
   ReaderT SqlBackend m ()
 insertDrepRegistration txId idx cred mcoin mAnchor = do
   drepId <- insertCredDrepHash cred
-  votingAnchorId <- whenMaybe mAnchor $ insertVotingAnchor txId
+  votingAnchorId <- whenMaybe mAnchor $ insertVotingAnchor txId DB.OtherAnchor
   void
     . DB.insertDrepRegistration
     $ DB.DrepRegistration
@@ -280,14 +280,16 @@ insertCommitteeRegistration ::
   Ledger.Credential 'ColdCommitteeRole StandardCrypto ->
   Ledger.Credential 'HotCommitteeRole StandardCrypto ->
   ReaderT SqlBackend m ()
-insertCommitteeRegistration txId idx khCold khHot = do
+insertCommitteeRegistration txId idx khCold cred = do
+  khHotId <- insertCommitteeHash cred
+  khColdId <- insertCommitteeHash khCold
   void
     . DB.insertCommitteeRegistration
     $ DB.CommitteeRegistration
       { DB.committeeRegistrationTxId = txId
       , DB.committeeRegistrationCertIndex = idx
-      , DB.committeeRegistrationColdKey = Generic.unCredentialHash khCold
-      , DB.committeeRegistrationHotKey = Generic.unCredentialHash khHot
+      , DB.committeeRegistrationColdKeyId = khColdId
+      , DB.committeeRegistrationHotKeyId = khHotId
       }
 
 insertCommitteeDeRegistration ::
@@ -298,13 +300,14 @@ insertCommitteeDeRegistration ::
   Maybe (Anchor StandardCrypto) ->
   ReaderT SqlBackend m ()
 insertCommitteeDeRegistration txId idx khCold mAnchor = do
-  votingAnchorId <- whenMaybe mAnchor $ insertVotingAnchor txId
+  votingAnchorId <- whenMaybe mAnchor $ insertVotingAnchor txId DB.OtherAnchor
+  khColdId <- insertCommitteeHash khCold
   void
     . DB.insertCommitteeDeRegistration
     $ DB.CommitteeDeRegistration
       { DB.committeeDeRegistrationTxId = txId
       , DB.committeeDeRegistrationCertIndex = idx
-      , DB.committeeDeRegistrationColdKey = Generic.unCredentialHash khCold
+      , DB.committeeDeRegistrationColdKeyId = khColdId
       , DB.committeeDeRegistrationVotingAnchorId = votingAnchorId
       }
 
