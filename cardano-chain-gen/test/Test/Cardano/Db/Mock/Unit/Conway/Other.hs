@@ -191,7 +191,7 @@ poolDeReg =
             , Conway.consTxCertPool
             )
           , -- Retire it
-            ([], PoolIndexNew 0, \_ poolId -> ConwayTxCertPool $ RetirePool poolId 1)
+            ([], PoolIndexNew 0, \_ poolId -> ConwayTxCertPool $ RetirePool poolId (EpochNo 1))
           ]
     -- Wait for it to sync
     assertBlockNoBackoff dbSync 2
@@ -246,7 +246,7 @@ poolDeRegMany =
             , Conway.consTxCertPool
             )
           , -- Deregister
-            ([], PoolIndexNew 0, mkPoolDereg 4)
+            ([], PoolIndexNew 0, mkPoolDereg (EpochNo 4))
           , -- Register--this will be deduplicated by the ledger, so counts
             -- below will not include this cert
 
@@ -276,7 +276,7 @@ poolDeRegMany =
             state'
         , Conway.mkDCertPoolTx
             [ -- Deregister
-              ([], PoolIndexNew 0, mkPoolDereg 4)
+              ([], PoolIndexNew 0, mkPoolDereg (EpochNo 4))
             , -- Register
 
               ( [StakeIndexNew 0, StakeIndexNew 1, StakeIndexNew 2]
@@ -284,7 +284,7 @@ poolDeRegMany =
               , Conway.consTxCertPool
               )
             , -- Deregister
-              ([], PoolIndexNew 0, mkPoolDereg 1)
+              ([], PoolIndexNew 0, mkPoolDereg (EpochNo 1))
             ]
             state'
         ]
@@ -294,7 +294,7 @@ poolDeRegMany =
     -- Verify pool counts
     -- (poolHashes, poolMetadataRefs, poolUpdates, poolOwners, poolRetires, poolRelays)
     -- TODO fix PoolOwner and PoolRelay unique key
-    assertPoolCounters dbSync (addPoolCounters (1, 1, 4, 8, 3, 4) initCounter)
+    assertPoolCounters dbSync (addPoolCounters (1, 4, 4, 8, 3, 4) initCounter)
 
     state' <- Api.getConwayLedgerState interpreter
     -- Not retired yet, because epoch hasn't changed
@@ -309,7 +309,7 @@ poolDeRegMany =
     -- Wait for it to sync
     assertBlockNoBackoff dbSync (length blks + 3)
     -- Pool counts should not have changed
-    assertPoolCounters dbSync (addPoolCounters (1, 1, 4, 8, 3, 4) initCounter)
+    assertPoolCounters dbSync (addPoolCounters (1, 4, 4, 8, 3, 4) initCounter)
     -- Only the latest certificate matters, so it should be retired in epoch 0
     assertPoolLayerCounters
       dbSync
@@ -373,11 +373,11 @@ poolDelist =
 
     void $
       Api.withConwayFindLeaderAndSubmitTx interpreter mockServer $
-        Conway.mkDCertPoolTx [([], PoolIndexNew 0, mkPoolDereg 1)]
+        Conway.mkDCertPoolTx [([], PoolIndexNew 0, mkPoolDereg (EpochNo 1))]
 
     void $ Api.forgeNextFindLeaderAndSubmit interpreter mockServer []
   where
-    testLabel = "poolDelist"
+    testLabel = "conwayPoolDelist"
 
 mkPoolDereg ::
   EpochNo ->
@@ -401,7 +401,7 @@ forkFixedEpoch =
     -- Add a simple Conway tx
     void $
       Api.withConwayFindLeaderAndSubmitTx interpreter mockServer $
-        Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10_000 500
+        Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10_000 500 0
     -- Fill the rest of the epoch
     epochs1 <- Api.fillUntilNextEpoch interpreter mockServer
 
@@ -429,7 +429,7 @@ rollbackFork =
     -- Forge a Conway tx
     blk <-
       Api.withConwayFindLeaderAndSubmitTx interpreter mockServer $
-        Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10_000 500
+        Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10_000 500 0
 
     -- Wait for it to sync
     assertBlockNoBackoff dbSync $ 2 + length (epoch0 <> epoch1 <> epoch1')
@@ -490,7 +490,7 @@ forkParam =
     -- Add a simple Conway tx
     void $
       Api.withConwayFindLeaderAndSubmitTx interpreter mockServer $
-        Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10_000 500
+        Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10_000 500 0
     -- Wait for it to sync
     assertBlockNoBackoff dbSync $ 2 + length (epoch0 <> epoch1)
   where

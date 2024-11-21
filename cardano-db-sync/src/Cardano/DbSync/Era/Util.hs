@@ -34,19 +34,19 @@ containsUnicodeNul :: Text -> Bool
 containsUnicodeNul = Text.isInfixOf "\\u000"
 
 safeDecodeToJson :: MonadIO m => Trace IO Text -> Text -> ByteString -> m (Maybe Text)
-safeDecodeToJson tracer tracePrefix x = do
-  ejson <- liftIO $ safeDecodeUtf8 x
+safeDecodeToJson tracer tracePrefix jsonBs = do
+  ejson <- liftIO $ safeDecodeUtf8 jsonBs
   case ejson of
     Left err -> do
       liftIO . logWarning tracer $
         mconcat
-          [tracePrefix, ": Could not decode to UTF8: ", DB.textShow err]
+          [tracePrefix, ": Could not decode to UTF8: ", textShow err]
       -- We have to insert
       pure Nothing
     Right json ->
       -- See https://github.com/IntersectMBO/cardano-db-sync/issues/297
       if containsUnicodeNul json
         then do
-          liftIO $ logWarning tracer $ tracePrefix <> ": dropped due to a Unicode NUL character. " <> json
+          liftIO $ logWarning tracer $ tracePrefix <> "was recorded as null, due to a Unicode NUL character found when trying to parse the json."
           pure Nothing
         else pure $ Just json

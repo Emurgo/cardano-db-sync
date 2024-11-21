@@ -21,7 +21,7 @@ import Cardano.DbSync.Cache (
   queryPrevBlockWithCache,
  )
 import Cardano.DbSync.Cache.Epoch (writeEpochBlockDiffToCache)
-import Cardano.DbSync.Cache.Types (Cache (..), CacheNew (..), EpochBlockDiff (..))
+import Cardano.DbSync.Cache.Types (CacheAction (..), CacheStatus (..), EpochBlockDiff (..))
 
 import qualified Cardano.DbSync.Era.Shelley.Generic as Generic
 import Cardano.DbSync.Era.Universal.Epoch
@@ -68,7 +68,7 @@ insertBlockUniversal syncEnv shouldLog withinTwoMins withinHalfHour blk details 
     pbid <- case Generic.blkPreviousHash blk of
       Nothing -> liftLookupFail (renderErrorMessage (Generic.blkEra blk)) DB.queryGenesis -- this is for networks that fork from Byron on epoch 0.
       Just pHash -> queryPrevBlockWithCache (renderErrorMessage (Generic.blkEra blk)) cache pHash
-    mPhid <- lift $ queryPoolKeyWithCache cache CacheNew $ coerceKeyRole $ Generic.blkSlotLeader blk
+    mPhid <- lift $ queryPoolKeyWithCache cache UpdateCache $ coerceKeyRole $ Generic.blkSlotLeader blk
     let epochNo = sdEpochNo details
 
     slid <- lift . DB.insertSlotLeader $ Generic.mkSlotLeader (ioShelley iopts) (Generic.unKeyHashRaw $ Generic.blkSlotLeader blk) (eitherToMaybe mPhid)
@@ -147,7 +147,7 @@ insertBlockUniversal syncEnv shouldLog withinTwoMins withinHalfHour blk details 
           ]
 
     whenStrictJust (apNewEpoch applyResult) $ \newEpoch -> do
-      insertOnNewEpoch tracer iopts blkId (Generic.blkSlotNo blk) epochNo newEpoch
+      insertOnNewEpoch syncEnv blkId (Generic.blkSlotNo blk) epochNo newEpoch
 
     insertStakeSlice syncEnv $ apStakeSlice applyResult
 
@@ -181,5 +181,5 @@ insertBlockUniversal syncEnv shouldLog withinTwoMins withinHalfHour blk details 
     tracer :: Trace IO Text
     tracer = getTrace syncEnv
 
-    cache :: Cache
+    cache :: CacheStatus
     cache = envCache syncEnv

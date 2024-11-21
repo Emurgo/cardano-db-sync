@@ -1,5 +1,10 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE TypeApplications #-}
+
+#if __GLASGOW_HASKELL__ >= 908
+{-# OPTIONS_GHC -Wno-x-partial #-}
+#endif
 
 module Test.Cardano.Db.Mock.Unit.Conway.Plutus (
   -- * Plutus send scripts
@@ -32,6 +37,8 @@ module Test.Cardano.Db.Mock.Unit.Conway.Plutus (
 
 import Cardano.Crypto.Hash.Class (hashToBytes)
 import qualified Cardano.Db as DB
+import qualified Cardano.Db.Schema.Core.TxOut as C
+import qualified Cardano.Db.Schema.Variant.TxOut as V
 import Cardano.DbSync.Era.Shelley.Generic.Util (renderAddress)
 import Cardano.Ledger.Coin (Coin (..))
 import Cardano.Ledger.Mary.Value (MaryValue (..), MultiAsset (..), PolicyID (..))
@@ -46,18 +53,34 @@ import Cardano.Mock.Query (queryMultiAssetCount)
 import Cardano.Prelude hiding (head)
 import qualified Data.Map as Map
 import Data.Maybe.Strict (StrictMaybe (..))
+import GHC.Base (error)
 import Ouroboros.Consensus.Shelley.Eras (StandardConway ())
 import Ouroboros.Network.Block (genesisPoint)
-import Test.Cardano.Db.Mock.Config
+import Test.Cardano.Db.Mock.Config (
+  CommandLineArgs (..),
+  configMultiAssetsDisable,
+  configPlutusDisable,
+  conwayConfigDir,
+  initCommandLineArgs,
+  startDBSync,
+  txOutTableTypeFromConfig,
+  withCustomConfig,
+  withFullConfig,
+  withFullConfigAndDropDB,
+ )
 import qualified Test.Cardano.Db.Mock.UnifiedApi as Api
 import Test.Cardano.Db.Mock.Validate
 import Test.Tasty.HUnit (Assertion ())
 import Prelude (head, tail, (!!))
 
+------------------------------------------------------------------------------
+-- Tests
+------------------------------------------------------------------------------
 simpleScript :: IOManager -> [(Text, Text)] -> Assertion
 simpleScript =
   withFullConfigAndDropDB conwayConfigDir testLabel $ \interpreter mockServer dbSync -> do
     startDBSync dbSync
+    let txOutTableType = txOutTableTypeFromConfig dbSync
 
     -- Forge a block with stake credentials
     void $ Api.registerAllStakeCreds interpreter mockServer
@@ -73,17 +96,29 @@ simpleScript =
     assertBlockNoBackoff dbSync (length epoch + 2)
     assertEqQuery
       dbSync
-      (map getOutFields <$> DB.queryScriptOutputs)
+      (map getOutFields <$> DB.queryScriptOutputs txOutTableType)
       [expectedFields]
       "Unexpected script outputs"
   where
     testLabel = "conwaySimpleScript"
     getOutFields txOut =
-      ( DB.txOutAddress txOut
-      , DB.txOutAddressHasScript txOut
-      , DB.txOutValue txOut
-      , DB.txOutDataHash txOut
-      )
+      case txOut of
+        DB.CTxOutW txOut' ->
+          ( C.txOutAddress txOut'
+          , C.txOutAddressHasScript txOut'
+          , C.txOutValue txOut'
+          , C.txOutDataHash txOut'
+          )
+        DB.VTxOutW txOut' mAddress ->
+          case mAddress of
+            Just address ->
+              ( V.addressAddress address
+              , V.addressHasScript address
+              , V.txOutValue txOut'
+              , V.txOutDataHash txOut'
+              )
+            Nothing -> error "conwaySimpleScript: expected an address"
+
     expectedFields =
       ( renderAddress Examples.alwaysSucceedsScriptAddr
       , True
@@ -128,7 +163,7 @@ unlockScriptSameBlock =
 
 unlockScriptNoPlutus :: IOManager -> [(Text, Text)] -> Assertion
 unlockScriptNoPlutus =
-  withCustomConfig args Nothing conwayConfigDir testLabel $ \interpreter mockServer dbSync -> do
+  withCustomConfig args (Just configPlutusDisable) conwayConfigDir testLabel $ \interpreter mockServer dbSync -> do
     startDBSync dbSync
 
     -- Forge a block with stake credentials
@@ -158,8 +193,7 @@ unlockScriptNoPlutus =
   where
     args =
       initCommandLineArgs
-        { claConfigFilename = "test-db-sync-config-no-plutus.json"
-        , claFullMode = False
+        { claFullMode = False
         }
     testLabel = "conwayConfigPlutusDisbaled"
 
@@ -764,7 +798,7 @@ swapMultiAssets =
 
 swapMultiAssetsDisabled :: IOManager -> [(Text, Text)] -> Assertion
 swapMultiAssetsDisabled =
-  withCustomConfig args Nothing cfgDir testLabel $ \interpreter mockServer dbSync -> do
+  withCustomConfig args (Just configMultiAssetsDisable) cfgDir testLabel $ \interpreter mockServer dbSync -> do
     startDBSync dbSync
 
     -- Forge a block with multiple multi-asset scripts
@@ -795,8 +829,7 @@ swapMultiAssetsDisabled =
   where
     args =
       initCommandLineArgs
-        { claConfigFilename = "test-db-sync-config-no-multi-assets.json"
-        , claFullMode = False
+        { claFullMode = False
         }
 
     testLabel = "conwayConfigMultiAssetsDisabled"

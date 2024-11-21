@@ -14,9 +14,10 @@ module Test.Cardano.Db.Mock.Validate (
   assertTxInCount,
   assertUnspentTx,
   assertRewardCount,
-  assertInstantRewardCount,
+  assertRewardRestCount,
   assertBlockNoBackoff,
   assertBlockNoBackoffTimes,
+  expectFailSilent,
   assertEqQuery,
   assertEqBackoff,
   assertBackoff,
@@ -43,6 +44,8 @@ module Test.Cardano.Db.Mock.Validate (
 
 import Cardano.Db
 import qualified Cardano.Db as DB
+import qualified Cardano.Db.Schema.Core.TxOut as C
+import qualified Cardano.Db.Schema.Variant.TxOut as V
 import qualified Cardano.DbSync.Era.Shelley.Generic as Generic
 import Cardano.DbSync.Era.Shelley.Generic.Util
 import qualified Cardano.Ledger.Address as Ledger
@@ -85,7 +88,8 @@ import Database.PostgreSQL.Simple (SqlError (..))
 import Ouroboros.Consensus.Cardano.Block
 import Ouroboros.Consensus.Shelley.Ledger (ShelleyBlock)
 import Test.Cardano.Db.Mock.Config
-import Test.Tasty.HUnit (assertEqual, assertFailure)
+import Test.Tasty (TestTree)
+import Test.Tasty.HUnit (Assertion, assertEqual, assertFailure, testCase)
 
 {- HLINT ignore "Reduce duplication" -}
 
@@ -103,7 +107,7 @@ assertTxCount env n = do
 
 assertTxOutCount :: DBSyncEnv -> Word -> IO ()
 assertTxOutCount env n = do
-  assertEqBackoff env queryTxOutCount n defaultDelays "Unexpected txOut count"
+  assertEqBackoff env (queryTxOutCount TxOutCore) n defaultDelays "Unexpected txOut count"
 
 assertTxInCount :: DBSyncEnv -> Word -> IO ()
 assertTxInCount env n = do
@@ -113,9 +117,9 @@ assertRewardCount :: DBSyncEnv -> Word64 -> IO ()
 assertRewardCount env n =
   assertEqBackoff env queryRewardCount n defaultDelays "Unexpected rewards count"
 
-assertInstantRewardCount :: DBSyncEnv -> Word64 -> IO ()
-assertInstantRewardCount env n =
-  assertEqBackoff env queryInstantRewardCount n defaultDelays "Unexpected instant rewards count"
+assertRewardRestCount :: DBSyncEnv -> Word64 -> IO ()
+assertRewardRestCount env n =
+  assertEqBackoff env queryRewardRestCount n defaultDelays "Unexpected instant rewards count"
 
 assertBlockNoBackoff :: DBSyncEnv -> Int -> IO ()
 assertBlockNoBackoff = assertBlockNoBackoffTimes defaultDelays
@@ -124,11 +128,19 @@ assertBlockNoBackoffTimes :: [Int] -> DBSyncEnv -> Int -> IO ()
 assertBlockNoBackoffTimes times env blockNo =
   assertEqBackoff env DB.queryBlockHeight (Just $ fromIntegral blockNo) times "Unexpected BlockNo"
 
+expectFailSilent :: String -> Assertion -> TestTree
+expectFailSilent name action = testCase name $ do
+  result <- catch (Right <$> action) (\(_ :: SomeException) -> pure $ Left ())
+  case result of
+    Left _ -> pure () -- Test failed as expected, do nothing
+    Right _ -> assertFailure "Expected test to fail but it succeeded"
+
 -- checking that unspent count matches from tx_in to tx_out
 assertUnspentTx :: DBSyncEnv -> IO ()
-assertUnspentTx syncEnv = do
-  unspentTxCount <- queryDBSync syncEnv DB.queryTxOutConsumedNullCount
-  consumedNullCount <- queryDBSync syncEnv DB.queryTxOutUnspentCount
+assertUnspentTx dbSyncEnv = do
+  let txOutTableType = txOutTableTypeFromConfig dbSyncEnv
+  unspentTxCount <- queryDBSync dbSyncEnv $ DB.queryTxOutConsumedNullCount txOutTableType
+  consumedNullCount <- queryDBSync dbSyncEnv $ DB.queryTxOutUnspentCount txOutTableType
   assertEqual "Unexpected tx unspent count between tx-in & tx-out" unspentTxCount consumedNullCount
 
 defaultDelays :: [Int]
@@ -204,7 +216,7 @@ assertAddrValues ::
 assertAddrValues env ix expected sta = do
   addr <- assertRight $ resolveAddress ix sta
   let address = Generic.renderAddress addr
-      q = queryAddressOutputs address
+      q = queryAddressOutputs TxOutCore address
   assertEqBackoff env q expected defaultDelays "Unexpected Balance"
 
 assertRight :: Show err => Either err a -> IO a
@@ -257,7 +269,7 @@ assertRewardCounts env st filterAddr mEpoch expected = do
     mkDBStakeAddress :: StakeIndex -> ByteString
     mkDBStakeAddress stIx = case resolveStakeCreds stIx st of
       Left _ -> error "could not resolve StakeIndex"
-      Right cred -> Ledger.serialiseRewardAcnt $ Ledger.RewardAcnt Testnet cred
+      Right cred -> Ledger.serialiseRewardAccount $ Ledger.RewardAccount Testnet cred
 
     updateAddrCounters ::
       RewardSource ->
@@ -276,6 +288,7 @@ assertRewardCounts env st filterAddr mEpoch expected = do
       RwdReserves -> (a, b, c + 1, d, e)
       RwdTreasury -> (a, b, c, d + 1, e)
       RwdDepositRefund -> (a, b, c, d, e + 1)
+      _ -> (a, b, c, d, e)
 
     updateMap ::
       (RewardSource, ByteString) ->
@@ -288,7 +301,7 @@ assertRewardCounts env st filterAddr mEpoch expected = do
       Just e -> rw ^. RewardSpendableEpoch ==. val e
     filterEpoch' rw = case mEpoch of
       Nothing -> val True
-      Just e -> rw ^. InstantRewardSpendableEpoch ==. val e
+      Just e -> rw ^. RewardRestSpendableEpoch ==. val e
 
     q = do
       res1 <- select . from $ \(reward `InnerJoin` stake_addr) -> do
@@ -296,9 +309,9 @@ assertRewardCounts env st filterAddr mEpoch expected = do
         where_ (filterEpoch reward)
         pure (reward ^. RewardType, stake_addr ^. StakeAddressHashRaw)
       res2 <- select . from $ \(ireward `InnerJoin` stake_addr) -> do
-        on (ireward ^. InstantRewardAddrId ==. stake_addr ^. StakeAddressId)
+        on (ireward ^. RewardRestAddrId ==. stake_addr ^. StakeAddressId)
         where_ (filterEpoch' ireward)
-        pure (ireward ^. InstantRewardType, stake_addr ^. StakeAddressHashRaw)
+        pure (ireward ^. RewardRestType, stake_addr ^. StakeAddressHashRaw)
       pure $ fmap (bimap unValue unValue) (res1 <> res2)
 
 assertEpochStake :: DBSyncEnv -> Word64 -> IO ()
@@ -362,7 +375,7 @@ assertAlonzoCounts env expected =
       colInputs <-
         maybe 0 unValue . listToMaybe
           <$> (select . from $ \(_a :: SqlExpr (Entity CollateralTxIn)) -> pure countRows)
-      scriptOutputs <- fromIntegral . length <$> queryScriptOutputs
+      scriptOutputs <- fromIntegral . length <$> queryScriptOutputs TxOutCore
       redeemerTxIn <- fromIntegral . length <$> queryTxInRedeemer
       invalidTx <- fromIntegral . length <$> queryInvalidTx
       txIninvalidTx <- fromIntegral . length <$> queryTxInFailedTx
@@ -395,7 +408,7 @@ assertBabbageCounts env expected =
       colInputs <-
         maybe 0 unValue . listToMaybe
           <$> (select . from $ \(_a :: SqlExpr (Entity CollateralTxIn)) -> pure countRows)
-      scriptOutputs <- fromIntegral . length <$> queryScriptOutputs
+      scriptOutputs <- fromIntegral . length <$> queryScriptOutputs TxOutCore
       redeemerTxIn <- fromIntegral . length <$> queryTxInRedeemer
       invalidTx <- fromIntegral . length <$> queryInvalidTx
       txIninvalidTx <- fromIntegral . length <$> queryTxInFailedTx
@@ -405,15 +418,29 @@ assertBabbageCounts env expected =
       referenceTxIn <-
         maybe 0 unValue . listToMaybe
           <$> (select . from $ \(_a :: SqlExpr (Entity ReferenceTxIn)) -> pure countRows)
-      collTxOut <-
-        maybe 0 unValue . listToMaybe
-          <$> (select . from $ \(_a :: SqlExpr (Entity CollateralTxOut)) -> pure countRows)
+      collTxOut <- case txOutTableTypeFromConfig env of
+        TxOutCore -> do
+          maybe 0 unValue . listToMaybe
+            <$> (select . from $ \(_a :: SqlExpr (Entity C.CollateralTxOut)) -> pure countRows)
+        TxOutVariantAddress -> do
+          maybe 0 unValue . listToMaybe
+            <$> (select . from $ \(_a :: SqlExpr (Entity V.CollateralTxOut)) -> pure countRows)
       inlineDatum <-
-        maybe 0 unValue . listToMaybe
-          <$> (select . from $ \txOut -> where_ (isJust (txOut ^. TxOutInlineDatumId)) >> pure countRows)
+        case txOutTableTypeFromConfig env of
+          TxOutCore -> do
+            maybe 0 unValue . listToMaybe
+              <$> (select . from $ \txOut -> where_ (isJust (txOut ^. C.TxOutInlineDatumId)) >> pure countRows)
+          TxOutVariantAddress -> do
+            maybe 0 unValue . listToMaybe
+              <$> (select . from $ \txOut -> where_ (isJust (txOut ^. V.TxOutInlineDatumId)) >> pure countRows)
       referenceScript <-
-        maybe 0 unValue . listToMaybe
-          <$> (select . from $ \txOut -> where_ (isJust (txOut ^. TxOutReferenceScriptId)) >> pure countRows)
+        case txOutTableTypeFromConfig env of
+          TxOutCore -> do
+            maybe 0 unValue . listToMaybe
+              <$> (select . from $ \txOut -> where_ (isJust (txOut ^. C.TxOutReferenceScriptId)) >> pure countRows)
+          TxOutVariantAddress -> do
+            maybe 0 unValue . listToMaybe
+              <$> (select . from $ \txOut -> where_ (isJust (txOut ^. V.TxOutReferenceScriptId)) >> pure countRows)
       pure
         ( scripts
         , redeemers

@@ -10,15 +10,17 @@ import Cardano.BM.Trace (logError, logInfo, logWarning)
 import qualified Cardano.Db as DB
 import Cardano.DbSync.Api
 import Cardano.DbSync.Api.Types
+import Cardano.DbSync.Cache (queryTxIdWithCache)
 import Cardano.DbSync.Era.Shelley.Generic.Tx.Babbage (fromTxOut)
 import Cardano.DbSync.Era.Shelley.Generic.Tx.Types (DBPlutusScript)
 import qualified Cardano.DbSync.Era.Shelley.Generic.Util as Generic
 import Cardano.DbSync.Era.Universal.Insert.Grouped
 import Cardano.DbSync.Era.Universal.Insert.Tx (insertTxOut)
-import Cardano.DbSync.Era.Util
+import Cardano.DbSync.Era.Util (liftLookupFail)
 import Cardano.DbSync.Error
 import Cardano.DbSync.Ledger.State
 import Cardano.DbSync.Types
+import Cardano.Ledger.Allegra.Scripts (Timelock)
 import Cardano.Ledger.Alonzo.Scripts
 import Cardano.Ledger.Babbage.Core
 import Cardano.Ledger.Babbage.TxBody (BabbageTxOut)
@@ -28,14 +30,13 @@ import Cardano.Ledger.Mary.Value
 import Cardano.Ledger.Shelley.LedgerState
 import Cardano.Ledger.TxIn
 import Cardano.Ledger.UTxO (UTxO (..))
-import Cardano.Prelude (lift)
+import Cardano.Prelude (lift, textShow)
 import Control.Concurrent.Class.MonadSTM.Strict (atomically, readTVarIO, writeTVar)
 import Control.Monad.Extra
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Control.Monad.Trans.Except (ExceptT)
 import Control.Monad.Trans.Reader (ReaderT)
-import Data.ByteString (ByteString)
 import Data.List.Extra
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
@@ -53,30 +54,23 @@ bootStrapMaybe ::
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
 bootStrapMaybe syncEnv = do
   bts <- liftIO $ readTVarIO (envBootstrap syncEnv)
-  when bts $ do
-    migrateBootstrapUTxO syncEnv emptyTxCache -- TODO: hardcoded to empty
-
-newtype TxCache = TxCache {txIdCache :: Map ByteString DB.TxId}
-
-emptyTxCache :: TxCache
-emptyTxCache = TxCache mempty
+  when bts $ migrateBootstrapUTxO syncEnv
 
 migrateBootstrapUTxO ::
   (MonadBaseControl IO m, MonadIO m) =>
   SyncEnv ->
-  TxCache ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-migrateBootstrapUTxO syncEnv txCache = do
+migrateBootstrapUTxO syncEnv = do
   case envLedgerEnv syncEnv of
     HasLedger lenv -> do
       liftIO $ logInfo trce "Starting UTxO bootstrap migration"
       cls <- liftIO $ readCurrentStateUnsafe lenv
-      count <- lift DB.deleteTxOut
+      count <- lift $ DB.deleteTxOut (getTxOutTableType syncEnv)
       when (count > 0) $
         liftIO $
           logWarning trce $
-            "Found and deleted " <> DB.textShow count <> " tx_out."
-      storeUTxOFromLedger syncEnv txCache cls
+            "Found and deleted " <> textShow count <> " tx_out."
+      storeUTxOFromLedger syncEnv cls
       lift $ DB.insertExtraMigration DB.BootstrapFinished
       liftIO $ logInfo trce "UTxO bootstrap migration done"
       liftIO $ atomically $ writeTVar (envBootstrap syncEnv) False
@@ -85,11 +79,11 @@ migrateBootstrapUTxO syncEnv txCache = do
   where
     trce = getTrace syncEnv
 
-storeUTxOFromLedger :: (MonadBaseControl IO m, MonadIO m) => SyncEnv -> TxCache -> ExtLedgerState CardanoBlock -> ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-storeUTxOFromLedger env txCache st = case ledgerState st of
-  LedgerStateBabbage bts -> storeUTxO env txCache (getUTxO bts)
-  LedgerStateConway stc -> storeUTxO env txCache (getUTxO stc)
-  _ -> liftIO $ logError trce "storeUTxOFromLedger is only supported after Babbage"
+storeUTxOFromLedger :: (MonadBaseControl IO m, MonadIO m) => SyncEnv -> ExtLedgerState CardanoBlock -> ExceptT SyncNodeError (ReaderT SqlBackend m) ()
+storeUTxOFromLedger env st = case ledgerState st of
+  LedgerStateBabbage bts -> storeUTxO env (getUTxO bts)
+  LedgerStateConway stc -> storeUTxO env (getUTxO stc)
+  _otherwise -> liftIO $ logError trce "storeUTxOFromLedger is only supported after Babbage"
   where
     trce = getTrace env
     getUTxO st' =
@@ -107,21 +101,21 @@ storeUTxO ::
   , MonadIO m
   , MonadBaseControl IO m
   , DBPlutusScript era
+  , NativeScript era ~ Timelock era
   ) =>
   SyncEnv ->
-  TxCache ->
   Map (TxIn StandardCrypto) (BabbageTxOut era) ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-storeUTxO env txCache mp = do
+storeUTxO env mp = do
   liftIO $
     logInfo trce $
       mconcat
         [ "Inserting "
-        , DB.textShow size
+        , textShow size
         , " tx_out as pages of "
-        , DB.textShow pageSize
+        , textShow pageSize
         ]
-  mapM_ (storePage env txCache pagePerc) . zip [0 ..] . chunksOf pageSize . Map.toList $ mp
+  mapM_ (storePage env pagePerc) . zip [0 ..] . chunksOf pageSize . Map.toList $ mp
   where
     trce = getTrace env
     npages = size `div` pageSize
@@ -135,21 +129,23 @@ storePage ::
   , TxOut era ~ BabbageTxOut era
   , DBPlutusScript era
   , BabbageEraTxOut era
+  , NativeScript era ~ Timelock era
   , MonadIO m
   , MonadBaseControl IO m
   ) =>
   SyncEnv ->
-  TxCache ->
   Float ->
   (Int, [(TxIn StandardCrypto, BabbageTxOut era)]) ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-storePage syncEnv cache percQuantum (n, ls) = do
+storePage syncEnv percQuantum (n, ls) = do
   when (n `mod` 10 == 0) $ liftIO $ logInfo trce $ "Bootstrap in progress " <> prc <> "%"
-  txOuts <- mapM (prepareTxOut syncEnv cache) ls
-  txOutIds <- lift . DB.insertManyTxOutPlex True False $ etoTxOut . fst <$> txOuts
-  let maTxOuts = concatMap mkmaTxOuts $ zip txOutIds (snd <$> txOuts)
+  txOuts <- mapM (prepareTxOut syncEnv) ls
+  txOutIds <-
+    lift . DB.insertManyTxOut False $ etoTxOut . fst <$> txOuts
+  let maTxOuts = concatMap (mkmaTxOuts txOutTableType) $ zip txOutIds (snd <$> txOuts)
   void . lift $ DB.insertManyMaTxOut maTxOuts
   where
+    txOutTableType = getTxOutTableType syncEnv
     trce = getTrace syncEnv
     prc = Text.pack $ showGFloat (Just 1) (max 0 $ min 100.0 (fromIntegral n * percQuantum)) ""
 
@@ -162,23 +158,17 @@ prepareTxOut ::
   , MonadIO m
   , MonadBaseControl IO m
   , DBPlutusScript era
+  , NativeScript era ~ Timelock era
   ) =>
   SyncEnv ->
-  TxCache ->
   (TxIn StandardCrypto, BabbageTxOut era) ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) (ExtendedTxOut, [MissingMaTxOut])
-prepareTxOut syncEnv txCache (TxIn txHash (TxIx index), txOut) = do
-  let txHashByteString = Generic.safeHashToByteString $ unTxId txHash
+prepareTxOut syncEnv (TxIn txIntxId (TxIx index), txOut) = do
+  let txHashByteString = Generic.safeHashToByteString $ unTxId txIntxId
   let genTxOut = fromTxOut index txOut
-  txId <- queryTxIdWithCache txCache txHashByteString
+  txId <- liftLookupFail "prepareTxOut" $ queryTxIdWithCache cache txIntxId
   insertTxOut trce cache iopts (txId, txHashByteString) genTxOut
   where
     trce = getTrace syncEnv
     cache = envCache syncEnv
     iopts = soptInsertOptions $ envOptions syncEnv
-
-queryTxIdWithCache :: MonadIO m => TxCache -> ByteString -> ExceptT SyncNodeError (ReaderT SqlBackend m) DB.TxId
-queryTxIdWithCache (TxCache mp) hsh = do
-  case Map.lookup hsh mp of
-    Just txId -> pure txId
-    Nothing -> liftLookupFail "queryTxIdWithCache" $ DB.queryTxId hsh

@@ -8,6 +8,7 @@
 
 module Cardano.DbSync.Era.Shelley.Generic.Tx.Shelley (
   fromShelleyTx,
+  getTxCBOR,
   getTxSize,
   mkTxIn,
   fromTxIn,
@@ -21,9 +22,11 @@ module Cardano.DbSync.Era.Shelley.Generic.Tx.Shelley (
   getTxMetadata,
   mkTxParamProposal,
   txHashId,
+  mkTxId,
   txHashFromSafe,
 ) where
 
+import Cardano.Binary (serialize')
 import qualified Cardano.Crypto.Hash as Crypto
 import Cardano.Db (ScriptType (..))
 import Cardano.DbSync.Era.Shelley.Generic.Metadata
@@ -52,7 +55,9 @@ fromShelleyTx :: (Word64, Core.Tx StandardShelley) -> Tx
 fromShelleyTx (blkIndex, tx) =
   Tx
     { txHash = txHashId tx
+    , txLedgerTxId = mkTxId tx
     , txBlockIndex = blkIndex
+    , txCBOR = getTxCBOR tx
     , txSize = getTxSize tx
     , txValidContract = True
     , txInputs = mkTxIn txBody
@@ -77,6 +82,7 @@ fromShelleyTx (blkIndex, tx) =
     , txExtraKeyWitnesses = []
     , txVotingProcedure = []
     , txProposalProcedure = []
+    , txTreasuryDonation = mempty -- Shelley does not support treasury donations
     }
   where
     txBody :: Core.TxBody StandardShelley
@@ -119,19 +125,28 @@ mkTxOut txBody = zipWith fromTxOut [0 ..] $ toList (txBody ^. Core.outputsTxBody
 fromTxIn :: Ledger.TxIn StandardCrypto -> TxIn
 fromTxIn (Ledger.TxIn (Ledger.TxId txid) (TxIx w64)) =
   TxIn
-    { txInHash = safeHashToByteString txid
-    , txInIndex = w64
+    { txInIndex = w64
     , txInRedeemerIndex = Nothing
+    , txInTxId = Ledger.TxId txid
     }
 
 txHashId :: (EraCrypto era ~ StandardCrypto, Core.EraTx era) => Core.Tx era -> ByteString
-txHashId tx = safeHashToByteString $ Ledger.hashAnnotated (tx ^. Core.bodyTxL)
+txHashId = safeHashToByteString . txSafeHash
+
+txSafeHash :: (EraCrypto era ~ StandardCrypto, Core.EraTx era) => Core.Tx era -> Ledger.SafeHash StandardCrypto Core.EraIndependentTxBody
+txSafeHash tx = Ledger.hashAnnotated (tx ^. Core.bodyTxL)
+
+mkTxId :: (EraCrypto era ~ StandardCrypto, Core.EraTx era) => Core.Tx era -> Ledger.TxId StandardCrypto
+mkTxId = Ledger.TxId . txSafeHash
 
 txHashFromSafe :: Ledger.SafeHash StandardCrypto Core.EraIndependentTxBody -> ByteString
 txHashFromSafe = Crypto.hashToBytes . Ledger.extractHash
 
 getTxSize :: Core.EraTx era => Core.Tx era -> Word64
 getTxSize tx = fromIntegral $ tx ^. Core.sizeTxF
+
+getTxCBOR :: Core.EraTx era => Core.Tx era -> ByteString
+getTxCBOR = serialize'
 
 mkTxIn ::
   (Core.EraTxBody era, EraCrypto era ~ StandardCrypto) =>
@@ -156,7 +171,7 @@ mkTxWithdrawals ::
 mkTxWithdrawals bd =
   map mkTxWithdrawal $ Map.toList $ Shelley.unWithdrawals $ bd ^. Core.withdrawalsTxBodyL
 
-mkTxWithdrawal :: (Shelley.RewardAcnt StandardCrypto, Coin) -> TxWithdrawal
+mkTxWithdrawal :: (Shelley.RewardAccount StandardCrypto, Coin) -> TxWithdrawal
 mkTxWithdrawal (ra, c) =
   TxWithdrawal
     { txwRedeemerIndex = Nothing

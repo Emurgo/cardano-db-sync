@@ -11,7 +11,8 @@ module Cardano.DbSync.OffChain.Http (
 
 import qualified Cardano.Crypto.Hash.Blake2b as Crypto
 import qualified Cardano.Crypto.Hash.Class as Crypto
-import Cardano.Db (PoolMetaHash (..), PoolUrl (..), VoteMetaHash (..), VoteUrl (..), textShow)
+import Cardano.Db (PoolMetaHash (..), PoolUrl (..), VoteMetaHash (..), VoteUrl (..))
+import qualified Cardano.Db as DB
 import Cardano.DbSync.OffChain.Types (
   PoolOffChainMetadata (..),
   PoolTicker (..),
@@ -37,6 +38,7 @@ import qualified Data.Text.Encoding as Text
 import GHC.Show (show)
 import Network.HTTP.Client (HttpException (..))
 import qualified Network.HTTP.Client as Http
+import Network.HTTP.Client.TLS (tlsManagerSettings)
 import qualified Network.HTTP.Types as Http
 
 -------------------------------------------------------------------------------------
@@ -55,7 +57,7 @@ httpGetOffChainPoolData manager request purl expectedMetaHash = do
   case unPoolMetaHash <$> expectedMetaHash of
     Just expectedMetaHashBs
       | metadataHash /= expectedMetaHashBs ->
-          left $ OCFErrHashMismatch url (renderByteArray expectedMetaHashBs) (renderByteArray metadataHash)
+          left $ OCFErrHashMismatch (Just url) (renderByteArray expectedMetaHashBs) (renderByteArray metadataHash)
     _ -> pure ()
   decodedMetadata <-
     case Aeson.eitherDecode' respLBS of
@@ -77,16 +79,36 @@ httpGetOffChainPoolData manager request purl expectedMetaHash = do
     url = OffChainPoolUrl purl
 
 httpGetOffChainVoteData ::
-  Http.Manager ->
-  Http.Request ->
+  [Text] ->
   VoteUrl ->
   Maybe VoteMetaHash ->
-  Bool ->
+  DB.AnchorType ->
   ExceptT OffChainFetchError IO SimplifiedOffChainVoteData
-httpGetOffChainVoteData manager request vurl metaHash isGovAction = do
+httpGetOffChainVoteData gateways vurl metaHash anchorType = do
+  case useIpfsGatewayMaybe vurl gateways of
+    Nothing -> httpGetOffChainVoteDataSingle vurl metaHash anchorType
+    Just [] -> left $ OCFErrNoIpfsGateway (OffChainVoteUrl vurl)
+    Just urls -> tryAllGatewaysRec urls []
+  where
+    tryAllGatewaysRec [] acc = left $ OCFErrIpfsGatewayFailures (OffChainVoteUrl vurl) (reverse acc)
+    tryAllGatewaysRec (url : rest) acc = do
+      msocd <- liftIO $ runExceptT $ httpGetOffChainVoteDataSingle url metaHash anchorType
+      case msocd of
+        Right socd -> pure socd
+        Left err -> tryAllGatewaysRec rest (err : acc)
+
+httpGetOffChainVoteDataSingle ::
+  VoteUrl ->
+  Maybe VoteMetaHash ->
+  DB.AnchorType ->
+  ExceptT OffChainFetchError IO SimplifiedOffChainVoteData
+httpGetOffChainVoteDataSingle vurl metaHash anchorType = do
+  manager <- liftIO $ Http.newManager tlsManagerSettings
+  request <- parseOffChainUrl url
+  let req = httpGetBytes manager request 10000 30000 url
   httpRes <- handleExceptT (convertHttpException url) req
   (respBS, respLBS, mContentType) <- hoistEither httpRes
-  (ocvd, decodedValue, metadataHash, mWarning) <- parseAndValidateVoteData respBS respLBS metaHash isGovAction (Just $ OffChainVoteUrl vurl)
+  (ocvd, decodedValue, metadataHash, mWarning) <- parseAndValidateVoteData respBS respLBS metaHash anchorType (Just $ OffChainVoteUrl vurl)
   pure $
     SimplifiedOffChainVoteData
       { sovaHash = metadataHash
@@ -97,21 +119,22 @@ httpGetOffChainVoteData manager request vurl metaHash isGovAction = do
       , sovaWarning = mWarning
       }
   where
-    req = httpGetBytes manager request 10000 30000 url
     url = OffChainVoteUrl vurl
 
-parseAndValidateVoteData :: ByteString -> LBS.ByteString -> Maybe VoteMetaHash -> Bool -> Maybe OffChainUrlType -> ExceptT OffChainFetchError IO (Vote.OffChainVoteData, Aeson.Value, ByteString, Maybe Text)
-parseAndValidateVoteData bs lbs metaHash isGa murl = do
+parseAndValidateVoteData :: ByteString -> LBS.ByteString -> Maybe VoteMetaHash -> DB.AnchorType -> Maybe OffChainUrlType -> ExceptT OffChainFetchError IO (Vote.OffChainVoteData, Aeson.Value, ByteString, Maybe Text)
+parseAndValidateVoteData bs lbs metaHash anchorType murl = do
   let metadataHash = Crypto.digest (Proxy :: Proxy Crypto.Blake2b_256) bs
   (hsh, mWarning) <- case unVoteMetaHash <$> metaHash of
-    Nothing -> pure (metadataHash, Nothing)
-    Just expectedMetaHash -> pure (expectedMetaHash, Just "Failed to validate metadata hash") -- TODO: Conway
+    Just expectedMetaHashBs
+      | metadataHash /= expectedMetaHashBs ->
+          left $ OCFErrHashMismatch murl (renderByteArray expectedMetaHashBs) (renderByteArray metadataHash)
+    _ -> pure (metadataHash, Nothing)
   decodedValue <-
     case Aeson.eitherDecode' @Aeson.Value lbs of
       Left err -> left $ OCFErrJsonDecodeFail murl (Text.pack err)
       Right res -> pure res
   ocvd <-
-    case Vote.eitherDecodeOffChainVoteData lbs isGa of
+    case Vote.eitherDecodeOffChainVoteData lbs anchorType of
       Left err -> left $ OCFErrJsonDecodeFail murl (Text.pack err)
       Right res -> pure res
   pure (ocvd, decodedValue, hsh, mWarning)
@@ -149,6 +172,8 @@ httpGetBytes manager request bytesToRead maxBytes url =
                   OCFErrBadContentTypeHtml url (Text.decodeLatin1 ct)
               unless
                 ( "application/json"
+                    `BS.isInfixOf` ct
+                    || "application/ld+json"
                     `BS.isInfixOf` ct
                     || "text/plain"
                     `BS.isInfixOf` ct
@@ -214,3 +239,9 @@ convertHttpException url he =
       case url of
         OffChainPoolUrl _ -> OCFErrUrlParseFail (OffChainPoolUrl $ PoolUrl $ Text.pack urlx) (Text.pack err)
         OffChainVoteUrl _ -> OCFErrUrlParseFail (OffChainVoteUrl $ VoteUrl $ Text.pack urlx) (Text.pack err)
+
+useIpfsGatewayMaybe :: VoteUrl -> [Text] -> Maybe [VoteUrl]
+useIpfsGatewayMaybe vu gateways =
+  case Text.stripPrefix "ipfs://" (unVoteUrl vu) of
+    Just sf -> Just $ VoteUrl . (<> sf) <$> gateways
+    Nothing -> Nothing

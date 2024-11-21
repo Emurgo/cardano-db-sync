@@ -26,7 +26,7 @@ module Cardano.DbSync (
 
 import Cardano.BM.Trace (Trace, logError, logInfo, logWarning)
 import qualified Cardano.Crypto as Crypto
-import Cardano.Db (textShow)
+import qualified Cardano.Db as DB
 import qualified Cardano.Db as Db
 import Cardano.DbSync.Api
 import Cardano.DbSync.Api.Types (InsertOptions (..), RunMigration, SyncEnv (..), SyncOptions (..), envLedgerEnv)
@@ -36,13 +36,14 @@ import Cardano.DbSync.Config.Types
 import Cardano.DbSync.Database
 import Cardano.DbSync.DbAction
 import Cardano.DbSync.Era
-import Cardano.DbSync.Error (SyncNodeError, hasAbortOnPanicEnv, runOrThrowIO)
+import Cardano.DbSync.Error
 import Cardano.DbSync.Ledger.State
 import Cardano.DbSync.OffChain (runFetchOffChainPoolThread, runFetchOffChainVoteThread)
 import Cardano.DbSync.Rollback (unsafeRollback)
 import Cardano.DbSync.Sync (runSyncNodeClient)
 import Cardano.DbSync.Tracing.ToObjectOrphans ()
 import Cardano.DbSync.Types
+import Cardano.DbSync.Util.Constraint (queryIsJsonbInSchema)
 import Cardano.Prelude hiding (Nat, (%))
 import Cardano.Slotting.Slot (EpochNo (..))
 import Control.Concurrent.Async
@@ -99,7 +100,7 @@ runDbSync metricsSetters knownMigrations iomgr trce params syncNodeConfigFromFil
         logInfo trce $ "Running database migrations in mode " <> textShow mode
         logInfo trce msg
         when (mode `elem` [Db.Indexes, Db.Full]) $ logWarning trce indexesMsg
-        Db.runMigrations pgConfig True dbMigrationDir (Just $ Db.LogFileDir "/tmp") mode
+        Db.runMigrations pgConfig True dbMigrationDir (Just $ Db.LogFileDir "/tmp") mode (txOutConfigToTableType txOutConfig)
   (ranMigrations, unofficial) <- if enpForceIndexes params then runMigration Db.Full else runMigration Db.Initial
   unless (null unofficial) $
     logWarning trce $
@@ -118,7 +119,7 @@ runDbSync metricsSetters knownMigrations iomgr trce params syncNodeConfigFromFil
 
   -- For testing and debugging.
   whenJust (enpMaybeRollback params) $ \slotNo ->
-    void $ unsafeRollback trce pgConfig slotNo
+    void $ unsafeRollback trce (txOutConfigToTableType txOutConfig) pgConfig slotNo
   runSyncNode
     metricsSetters
     trce
@@ -136,7 +137,7 @@ runDbSync metricsSetters knownMigrations iomgr trce params syncNodeConfigFromFil
     indexesMsg :: Text
     indexesMsg =
       mconcat
-        [ "Creating Indexes. This may take a while."
+        [ "Creating Indexes. This may require an extended period of time to perform."
         , " Setting a higher maintenance_work_mem from Postgres usually speeds up this process."
         , " These indexes are not used by db-sync but are meant for clients. If you want to skip"
         , " some of these indexes, you can stop db-sync, delete or modify any migration-4-* files"
@@ -144,6 +145,8 @@ runDbSync metricsSetters knownMigrations iomgr trce params syncNodeConfigFromFil
         ]
 
     syncOpts = extractSyncOptions params abortOnPanic syncNodeConfigFromFile
+
+    txOutConfig = sioTxOut $ dncInsertOptions syncNodeConfigFromFile
 
 runSyncNode ::
   MetricSetters ->
@@ -173,6 +176,7 @@ runSyncNode metricsSetters trce iomgr dbConnString ranMigrations runMigrationFnc
       \backend -> liftIO $ do
         runOrThrowIO $ runExceptT $ do
           genCfg <- readCardanoGenesisConfig syncNodeConfigFromFile
+          isJsonbInSchema <- queryIsJsonbInSchema backend
           logProtocolMagicId trce $ genesisProtocolMagicId genCfg
           syncEnv <-
             ExceptT $
@@ -186,6 +190,16 @@ runSyncNode metricsSetters trce iomgr dbConnString ranMigrations runMigrationFnc
                 syncNodeParams
                 ranMigrations
                 runMigrationFnc
+
+          -- Warn the user that jsonb datatypes are being removed from the database schema.
+          when (isJsonbInSchema && removeJsonbFromSchemaConfig) $ do
+            liftIO $ logWarning trce "Removing jsonb datatypes from the database. This can take time."
+            liftIO $ runRemoveJsonbFromSchema syncEnv
+
+          -- Warn the user that jsonb datatypes are being added to the database schema.
+          when (not isJsonbInSchema && not removeJsonbFromSchemaConfig) $ do
+            liftIO $ logWarning trce "Adding jsonb datatypes back to the database. This can take time."
+            liftIO $ runAddJsonbToSchema syncEnv
           liftIO $ runExtraMigrationsMaybe syncEnv
           unless useLedger $ liftIO $ do
             logInfo trce "Migrating to a no ledger schema"
@@ -208,8 +222,8 @@ runSyncNode metricsSetters trce iomgr dbConnString ranMigrations runMigrationFnc
     useShelleyInit cfg =
       case dncShelleyHardFork cfg of
         HardFork.TriggerHardForkAtEpoch (EpochNo 0) -> True
-        _ -> False
-
+        _other -> False
+    removeJsonbFromSchemaConfig = ioRemoveJsonbFromSchema $ soptInsertOptions syncOptions
     maybeLedgerDir = enpMaybeLedgerStateDir syncNodeParams
 
 logProtocolMagicId :: Trace IO Text -> Crypto.ProtocolMagicId -> ExceptT SyncNodeError IO ()
@@ -227,9 +241,9 @@ extractSyncOptions :: SyncNodeParams -> Bool -> SyncNodeConfig -> SyncOptions
 extractSyncOptions snp aop snc =
   SyncOptions
     { soptEpochAndCacheEnabled =
-        not isTxOutBootstrap'
+        not isTxOutConsumedBootstrap'
           && ioInOut iopts
-          && not (enpEpochDisabled snp && enpHasCache snp)
+          && not (enpEpochDisabled snp || not (enpHasCache snp))
     , soptAbortOnInvalid = aop
     , soptCache = enpHasCache snp
     , soptSkipFix = enpSkipFix snp
@@ -237,8 +251,8 @@ extractSyncOptions snp aop snc =
     , soptPruneConsumeMigration =
         initPruneConsumeMigration
           isTxOutConsumed'
-          isTxOutPrune'
-          isTxOutBootstrap'
+          isTxOutConsumedPrune'
+          isTxOutConsumedBootstrap'
           forceTxIn'
     , soptInsertOptions = iopts
     , snapshotEveryFollowing = enpSnEveryFollowing snp
@@ -254,6 +268,7 @@ extractSyncOptions snp aop snc =
     iopts =
       InsertOptions
         { ioInOut = isTxOutEnabled'
+        , ioTxCBOR = isTxCBOREnabled (sioTxCBOR (dncInsertOptions snc))
         , ioUseLedger = useLedger
         , ioShelley = isShelleyEnabled (sioShelley (dncInsertOptions snc))
         , -- Rewards are only disabled on "disable_all" and "only_gov" presets
@@ -263,7 +278,10 @@ extractSyncOptions snp aop snc =
         , ioKeepMetadataNames = maybeKeepMNames
         , ioPlutusExtra = isPlutusEnabled (sioPlutus (dncInsertOptions snc))
         , ioOffChainPoolData = useOffchainPoolData
+        , ioPoolStats = isPoolStatsEnabled (sioPoolStats (dncInsertOptions snc))
         , ioGov = useGovernance
+        , ioRemoveJsonbFromSchema = isRemoveJsonbFromSchemaEnabled (sioRemoveJsonbFromSchema (dncInsertOptions snc))
+        , ioTxOutTableType = ioTxOutTableType'
         }
 
     useLedger = sioLedger (dncInsertOptions snc) == LedgerEnable
@@ -273,10 +291,11 @@ extractSyncOptions snp aop snc =
       isGovernanceEnabled (sioGovernance (dncInsertOptions snc))
 
     isTxOutConsumed' = isTxOutConsumed . sioTxOut . dncInsertOptions $ snc
-    isTxOutPrune' = isTxOutPrune . sioTxOut . dncInsertOptions $ snc
-    isTxOutBootstrap' = isTxOutBootstrap . sioTxOut . dncInsertOptions $ snc
+    isTxOutConsumedPrune' = isTxOutConsumedPrune . sioTxOut . dncInsertOptions $ snc
+    isTxOutConsumedBootstrap' = isTxOutConsumedBootstrap . sioTxOut . dncInsertOptions $ snc
     isTxOutEnabled' = isTxOutEnabled . sioTxOut . dncInsertOptions $ snc
     forceTxIn' = forceTxIn . sioTxOut . dncInsertOptions $ snc
+    ioTxOutTableType' = txOutConfigToTableType $ sioTxOut $ dncInsertOptions snc
 
 startupReport :: Trace IO Text -> Bool -> SyncNodeParams -> IO ()
 startupReport trce aop params = do
@@ -284,3 +303,11 @@ startupReport trce aop params = do
   logInfo trce $ mconcat ["Git hash: ", Db.gitRev]
   logInfo trce $ mconcat ["Enviroment variable DbSyncAbortOnPanic: ", textShow aop]
   logInfo trce $ textShow params
+
+txOutConfigToTableType :: TxOutConfig -> DB.TxOutTableType
+txOutConfigToTableType config = case config of
+  TxOutEnable (UseTxOutAddress flag) -> if flag then DB.TxOutVariantAddress else DB.TxOutCore
+  TxOutDisable -> DB.TxOutCore
+  TxOutConsumed _ (UseTxOutAddress flag) -> if flag then DB.TxOutVariantAddress else DB.TxOutCore
+  TxOutConsumedPrune _ (UseTxOutAddress flag) -> if flag then DB.TxOutVariantAddress else DB.TxOutCore
+  TxOutConsumedBootstrap _ (UseTxOutAddress flag) -> if flag then DB.TxOutVariantAddress else DB.TxOutCore

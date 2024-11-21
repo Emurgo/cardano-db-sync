@@ -1,9 +1,15 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE NumericUnderscores #-}
+
+#if __GLASGOW_HASKELL__ >= 908
+{-# OPTIONS_GHC -Wno-x-partial #-}
+#endif
 
 module Test.Cardano.Db.Mock.Unit.Conway.Tx (
   addSimpleTx,
   addSimpleTxShelley,
   addSimpleTxNoLedger,
+  addTxTreasuryDonation,
   consumeSameBlock,
   addTxMetadata,
   addTxMetadataDisabled,
@@ -16,6 +22,7 @@ import qualified Cardano.Mock.Forging.Tx.Conway as Conway
 import qualified Cardano.Mock.Forging.Tx.Shelley as Shelley
 import Cardano.Mock.Forging.Types (UTxOIndex (..))
 import Cardano.Mock.Query (queryNullTxDepositExists, queryTxMetadataCount)
+import qualified Cardano.Mock.Query as Query
 import Cardano.Prelude hiding (head)
 import qualified Data.Map as Map
 import Test.Cardano.Db.Mock.Config
@@ -30,7 +37,7 @@ addSimpleTx =
     -- Forge a block
     void $
       UnifiedApi.withConwayFindLeaderAndSubmitTx interpreter mockServer $
-        Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10_000 500
+        Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10_000 500 0
 
     startDBSync dbSync
     -- Verify it syncs
@@ -58,11 +65,11 @@ addSimpleTxShelley =
 
 addSimpleTxNoLedger :: IOManager -> [(Text, Text)] -> Assertion
 addSimpleTxNoLedger = do
-  withCustomConfig args Nothing conwayConfigDir testLabel $ \interpreter mockServer dbSync -> do
+  withCustomConfig args (Just configLedgerIgnore) conwayConfigDir testLabel $ \interpreter mockServer dbSync -> do
     -- Forge a block
     void $
       UnifiedApi.withConwayFindLeaderAndSubmitTx interpreter mockServer $
-        Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10_000 500
+        Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10_000 500 0
 
     startDBSync dbSync
     -- Verify it syncs
@@ -73,10 +80,28 @@ addSimpleTxNoLedger = do
   where
     args =
       initCommandLineArgs
-        { claConfigFilename = "test-db-sync-config-no-ledger.json"
-        , claFullMode = False
+        { claFullMode = False
         }
     testLabel = "conwayConfigLedgerDisabled"
+
+addTxTreasuryDonation :: IOManager -> [(Text, Text)] -> Assertion
+addTxTreasuryDonation =
+  withFullConfig conwayConfigDir testLabel $ \interpreter mockServer dbSync -> do
+    startDBSync dbSync
+
+    -- Forge a block
+    void $
+      UnifiedApi.withConwayFindLeaderAndSubmitTx interpreter mockServer $
+        Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 10_000 500 1_000
+
+    -- Wait for it to sync
+    assertBlockNoBackoff dbSync 1
+    -- Should have a treasury donation
+    assertEqQuery dbSync Query.queryTreasuryDonations 1_000 "Unexpected treasury donations"
+
+    assertTxCount dbSync 12
+  where
+    testLabel = "conwayAddSimpleTx"
 
 consumeSameBlock :: IOManager -> [(Text, Text)] -> Assertion
 consumeSameBlock =
@@ -85,10 +110,10 @@ consumeSameBlock =
 
     -- Forge some transactions
     void $ UnifiedApi.withConwayFindLeaderAndSubmit interpreter mockServer $ \state' -> do
-      tx0 <- Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 20_000 20_000 state'
+      tx0 <- Conway.mkPaymentTx (UTxOIndex 0) (UTxOIndex 1) 20_000 20_000 0 state'
       let utxo0 = head (Conway.mkUTxOConway tx0)
       -- Create a transaction with UTxOs from tx0
-      tx1 <- Conway.mkPaymentTx (UTxOPair utxo0) (UTxOIndex 2) 10_000 500 state'
+      tx1 <- Conway.mkPaymentTx (UTxOPair utxo0) (UTxOIndex 2) 10_000 500 0 state'
       pure [tx0, tx1]
 
     -- Verify the new transaction count
@@ -99,31 +124,28 @@ consumeSameBlock =
 
 addTxMetadata :: IOManager -> [(Text, Text)] -> Assertion
 addTxMetadata = do
-  withCustomConfigAndDropDB args Nothing cfgDir testLabel $ \interpreter mockServer dbSync -> do
-    startDBSync dbSync
+  withCustomConfigAndDropDB args (Just configMetadataEnable) cfgDir testLabel $
+    \interpreter mockServer dbSync -> do
+      startDBSync dbSync
+      -- Add blocks with transactions
+      void $
+        UnifiedApi.withConwayFindLeaderAndSubmitTx interpreter mockServer $ \_ ->
+          let txBody = Conway.mkDummyTxBody
+              auxData = Map.fromList [(1, I 1), (2, I 2)]
+           in Right (Conway.mkAuxDataTx True txBody auxData)
 
-    -- Add blocks with transactions
-    void $
-      UnifiedApi.withConwayFindLeaderAndSubmitTx interpreter mockServer $ \_ ->
-        let txBody = Conway.mkDummyTxBody
-            auxData = Map.fromList [(1, I 1), (2, I 2)]
-         in Right (Conway.mkAuxDataTx True txBody auxData)
-
-    -- Wait for it to sync
-    assertBlockNoBackoff dbSync 1
-    -- Should have tx metadata
-    assertEqBackoff dbSync queryTxMetadataCount 2 [] "Expected tx metadata"
+      -- Wait for it to sync
+      assertBlockNoBackoff dbSync 1
+      -- Should have tx metadata
+      assertEqBackoff dbSync queryTxMetadataCount 2 [] "Expected tx metadata"
   where
-    args =
-      initCommandLineArgs
-        { claFullMode = False
-        }
+    args = initCommandLineArgs {claFullMode = False}
     testLabel = "conwayConfigMetadataEnabled"
     cfgDir = conwayConfigDir
 
 addTxMetadataWhitelist :: IOManager -> [(Text, Text)] -> Assertion
 addTxMetadataWhitelist = do
-  withCustomConfigAndDropDB args Nothing cfgDir testLabel $ \interpreter mockServer dbSync -> do
+  withCustomConfigAndDropDB args (Just configMetadataKeys) cfgDir testLabel $ \interpreter mockServer dbSync -> do
     startDBSync dbSync
 
     -- Add blocks with transactions
@@ -140,33 +162,28 @@ addTxMetadataWhitelist = do
   where
     args =
       initCommandLineArgs
-        { claConfigFilename = "test-db-sync-config-keep-metadata.json"
-        , claFullMode = False
+        { claFullMode = False
         }
     testLabel = "conwayConfigMetadataKeep"
     cfgDir = conwayConfigDir
 
 addTxMetadataDisabled :: IOManager -> [(Text, Text)] -> Assertion
 addTxMetadataDisabled = do
-  withCustomConfigAndDropDB args Nothing cfgDir testLabel $ \interpreter mockServer dbSync -> do
-    startDBSync dbSync
+  withCustomConfigAndDropDB args (Just configMetadataDisable) cfgDir testLabel $
+    \interpreter mockServer dbSync -> do
+      startDBSync dbSync
+      -- Add blocks with transactions
+      void $
+        UnifiedApi.withConwayFindLeaderAndSubmitTx interpreter mockServer $ \_ ->
+          let txBody = Conway.mkDummyTxBody
+              auxData = Map.fromList [(1, I 1), (2, I 2)]
+           in Right (Conway.mkAuxDataTx True txBody auxData)
 
-    -- Add blocks with transactions
-    void $
-      UnifiedApi.withConwayFindLeaderAndSubmitTx interpreter mockServer $ \_ ->
-        let txBody = Conway.mkDummyTxBody
-            auxData = Map.singleton 1 (I 1)
-         in Right (Conway.mkAuxDataTx True txBody auxData)
-
-    -- Wait for it to sync
-    assertBlockNoBackoff dbSync 1
-    -- Should have tx metadata
-    assertEqBackoff dbSync queryTxMetadataCount 0 [] "Expected tx metadata"
+      -- Wait for it to sync
+      assertBlockNoBackoff dbSync 1
+      -- Should have tx metadata
+      assertEqBackoff dbSync queryTxMetadataCount 0 [] "Expected tx metadata"
   where
-    args =
-      initCommandLineArgs
-        { claConfigFilename = "test-db-sync-config-no-metadata.json"
-        , claFullMode = False
-        }
+    args = initCommandLineArgs {claFullMode = False}
     testLabel = "conwayConfigMetadataDisabled"
     cfgDir = conwayConfigDir

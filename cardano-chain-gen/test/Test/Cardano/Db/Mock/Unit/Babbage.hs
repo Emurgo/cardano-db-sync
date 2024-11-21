@@ -9,12 +9,10 @@ module Test.Cardano.Db.Mock.Unit.Babbage (
 import Cardano.Mock.ChainSync.Server (IOManager)
 import Data.Text (Text)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.ExpectedFailure (expectFail)
 import Test.Tasty.HUnit (Assertion, testCase)
 
 import qualified Test.Cardano.Db.Mock.Unit.Babbage.CommandLineArg.ConfigFile as ConfigFile
 import qualified Test.Cardano.Db.Mock.Unit.Babbage.CommandLineArg.EpochDisabled as EpochDisabled
-import qualified Test.Cardano.Db.Mock.Unit.Babbage.CommandLineArg.ForceIndex as ForceIndex
 import qualified Test.Cardano.Db.Mock.Unit.Babbage.Config.MigrateConsumedPruneTxOut as MigrateConsumedPruneTxOut
 import qualified Test.Cardano.Db.Mock.Unit.Babbage.Config.Parse as Config
 import qualified Test.Cardano.Db.Mock.Unit.Babbage.InlineAndReference as BabInlineRef
@@ -25,6 +23,7 @@ import qualified Test.Cardano.Db.Mock.Unit.Babbage.Rollback as BabRollback
 import qualified Test.Cardano.Db.Mock.Unit.Babbage.Simple as BabSimple
 import qualified Test.Cardano.Db.Mock.Unit.Babbage.Stake as BabStake
 import qualified Test.Cardano.Db.Mock.Unit.Babbage.Tx as BabTx
+import Test.Cardano.Db.Mock.Validate (expectFailSilent)
 
 unitTests :: IOManager -> [(Text, Text)] -> TestTree
 unitTests iom knownMigrations =
@@ -35,9 +34,9 @@ unitTests iom knownMigrations =
         [ testCase "default insert config" Config.defaultInsertConfig
         , testCase "insert config" Config.insertConfig
         , testGroup
-            "consumed-tx-out and prune-tx-out"
-            [ test "flag check" MigrateConsumedPruneTxOut.txConsumedColumnCheck
-            , test "basic prune" MigrateConsumedPruneTxOut.basicPrune
+            "tx-out"
+            [ test "basic prune" MigrateConsumedPruneTxOut.basicPrune
+            , test "basic prune with address table" MigrateConsumedPruneTxOut.basicPruneWithAddress
             , test "prune with simple rollback" MigrateConsumedPruneTxOut.pruneWithSimpleRollback
             , test "prune with full tx rollback" MigrateConsumedPruneTxOut.pruneWithFullTxRollback
             , test "pruning should keep some tx" MigrateConsumedPruneTxOut.pruningShouldKeepSomeTx
@@ -45,9 +44,23 @@ unitTests iom knownMigrations =
             , test "no pruning and rollback" MigrateConsumedPruneTxOut.noPruneAndRollBack
             , test "prune same block" MigrateConsumedPruneTxOut.pruneSameBlock
             , test "no pruning same block" MigrateConsumedPruneTxOut.noPruneSameBlock
-            , expectFail $ test "restart with new consumed set to false" MigrateConsumedPruneTxOut.migrateAndPruneRestart
-            , expectFail $ test "set prune flag, restart missing prune flag" MigrateConsumedPruneTxOut.pruneRestartMissingFlag
-            , expectFail $ test "set bootstrap flag, restart missing bootstrap flag" MigrateConsumedPruneTxOut.bootstrapRestartMissingFlag
+            , expectFailSilent "restart with new consumed set to false" $ MigrateConsumedPruneTxOut.migrateAndPruneRestart iom knownMigrations
+            , expectFailSilent "set prune flag, restart missing prune flag" $ MigrateConsumedPruneTxOut.pruneRestartMissingFlag iom knownMigrations
+            , expectFailSilent "set bootstrap flag, restart missing bootstrap flag" $ MigrateConsumedPruneTxOut.bootstrapRestartMissingFlag iom knownMigrations
+            ]
+        , testGroup
+            "tx-out using Address table"
+            [ test "basic prune with address table" MigrateConsumedPruneTxOut.basicPruneWithAddress
+            , test "prune with simple rollback with address table" MigrateConsumedPruneTxOut.pruneWithSimpleRollbackWithAddress
+            , test "prune with full tx rollback with address table" MigrateConsumedPruneTxOut.pruneWithFullTxRollbackWithAddress
+            , test "pruning should keep some tx with address table" MigrateConsumedPruneTxOut.pruningShouldKeepSomeTxWithAddress
+            , test "prune and rollback one block with address table" MigrateConsumedPruneTxOut.pruneAndRollBackOneBlockWithAddress
+            , test "no pruning and rollback with address table" MigrateConsumedPruneTxOut.noPruneAndRollBackWithAddress
+            , test "prune same block with address table" MigrateConsumedPruneTxOut.pruneSameBlockWithAddress
+            , test "no pruning same block with address table" MigrateConsumedPruneTxOut.noPruneSameBlockWithAddress
+            , expectFailSilent "restart with new consumed set to false, with address table" $ MigrateConsumedPruneTxOut.migrateAndPruneRestartWithAddress iom knownMigrations
+            , expectFailSilent "set prune flag, restart missing prune flag, with address table" $ MigrateConsumedPruneTxOut.pruneRestartMissingFlagWithAddress iom knownMigrations
+            , expectFailSilent "set bootstrap flag, restart missing bootstrap flag, with address table" $ MigrateConsumedPruneTxOut.bootstrapRestartMissingFlagWithAddress iom knownMigrations
             ]
         ]
     , testGroup
@@ -63,17 +76,12 @@ unitTests iom knownMigrations =
         "Command Line Arguments"
         [ testGroup
             "config"
-            [ expectFail $ test "fails if incorrect config file given" ConfigFile.checkConfigFileArg
+            [ expectFailSilent "fails if incorrect config file given" $ ConfigFile.checkConfigFileArg iom knownMigrations
             ]
         , testGroup
             "disable-epoch"
             [ test "Epoch doesn't update when disabled" EpochDisabled.checkEpochDisabledArg
             , test "Epoch updates when enabled" EpochDisabled.checkEpochEnabled
-            ]
-        , testGroup
-            "force-indexes"
-            [ test "check force-index adds indexes" ForceIndex.checkForceIndexesArg
-            , test "check no force-index doesn't add indexes" ForceIndex.checkNoForceIndexesArg
             ]
         ]
     , testGroup

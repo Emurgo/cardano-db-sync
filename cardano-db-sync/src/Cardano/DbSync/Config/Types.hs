@@ -18,11 +18,17 @@ module Cardano.DbSync.Config.Types (
   GenesisHashByron (..),
   GenesisHashAlonzo (..),
   GenesisHashConway (..),
+  RemoveJsonbFromSchemaConfig (..),
+  TxOutTableTypeConfig (..),
   SyncNodeConfig (..),
   SyncPreConfig (..),
   SyncInsertConfig (..),
+  SyncInsertPreset (..),
   SyncInsertOptions (..),
+  TxCBORConfig (..),
+  PoolStatsConfig (..),
   TxOutConfig (..),
+  UseTxOutAddress (..),
   ForceTxIn (..),
   LedgerInsertConfig (..),
   ShelleyInsertConfig (..),
@@ -48,10 +54,14 @@ module Cardano.DbSync.Config.Types (
   isMultiAssetEnabled,
   isMetadataEnabled,
   isPlutusEnabled,
-  isTxOutBootstrap,
+  isTxOutConsumedBootstrap,
   isTxOutConsumed,
-  isTxOutPrune,
+  isTxOutConsumedPrune,
   forceTxIn,
+  fullInsertOptions,
+  onlyUTxOInsertOptions,
+  onlyGovInsertOptions,
+  disableAllInsertOptions,
 ) where
 
 import qualified Cardano.BM.Configuration as Logging
@@ -59,13 +69,14 @@ import qualified Cardano.BM.Data.Configuration as Logging
 import qualified Cardano.Chain.Update as Byron
 import Cardano.Crypto (RequiresNetworkMagic (..))
 import qualified Cardano.Crypto.Hash as Crypto
-import Cardano.Db (MigrationDir, PGPassSource (..))
+import Cardano.Db (MigrationDir, PGPassSource (..), TxOutTableType (..))
 import Cardano.Prelude
 import Cardano.Slotting.Slot (SlotNo (..))
 import Control.Monad (fail)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), (.!=), (.:), (.:?), (.=))
 import qualified Data.Aeson as Aeson
-import Data.Aeson.Types (Parser, typeMismatch)
+import Data.Aeson.Key (fromText)
+import Data.Aeson.Types (Pair, Parser, typeMismatch)
 import Data.ByteString.Short (ShortByteString (), fromShort, toShort)
 import Data.Default.Class (Default (..))
 import Ouroboros.Consensus.Cardano.CanHardFork (TriggerHardFork (..))
@@ -133,29 +144,38 @@ data SyncNodeConfig = SyncNodeConfig
   , dncBabbageHardFork :: !TriggerHardFork
   , dncConwayHardFork :: !TriggerHardFork
   , dncInsertOptions :: !SyncInsertOptions
+  , dncIpfsGateway :: [Text]
   }
 
 data SyncPreConfig = SyncPreConfig
   { pcNetworkName :: !NetworkName
   , pcLoggingConfig :: !Logging.Representation
   , pcNodeConfigFile :: !NodeConfigFile
+  , pcEnableFutureGenesis :: !Bool
   , pcEnableLogging :: !Bool
   , pcEnableMetrics :: !Bool
   , pcPrometheusPort :: !Int
   , pcInsertConfig :: !SyncInsertConfig
+  , pcIpfsGateway :: ![Text]
   }
   deriving (Show)
 
-data SyncInsertConfig
-  = FullInsertOptions
-  | OnlyUTxOInsertOptions
-  | OnlyGovInsertOptions
-  | DisableAllInsertOptions
-  | SyncInsertConfig SyncInsertOptions
+data SyncInsertConfig = SyncInsertConfig
+  { sicPreset :: Maybe SyncInsertPreset
+  , sicOptions :: SyncInsertOptions
+  }
+  deriving (Eq, Show)
+
+data SyncInsertPreset
+  = FullInsertPreset
+  | OnlyUTxOInsertPreset
+  | OnlyGovInsertPreset
+  | DisableAllInsertPreset
   deriving (Eq, Show)
 
 data SyncInsertOptions = SyncInsertOptions
-  { sioTxOut :: TxOutConfig
+  { sioTxCBOR :: TxCBORConfig
+  , sioTxOut :: TxOutConfig
   , sioLedger :: LedgerInsertConfig
   , sioShelley :: ShelleyInsertConfig
   , sioRewards :: RewardsConfig
@@ -164,19 +184,35 @@ data SyncInsertOptions = SyncInsertOptions
   , sioPlutus :: PlutusConfig
   , sioGovernance :: GovernanceConfig
   , sioOffchainPoolData :: OffchainPoolDataConfig
+  , sioPoolStats :: PoolStatsConfig
   , sioJsonType :: JsonTypeConfig
+  , sioRemoveJsonbFromSchema :: RemoveJsonbFromSchemaConfig
+  }
+  deriving (Eq, Show)
+
+newtype TxCBORConfig = TxCBORConfig
+  { isTxCBOREnabled :: Bool
+  }
+  deriving (Eq, Show)
+
+newtype PoolStatsConfig = PoolStatsConfig
+  { isPoolStatsEnabled :: Bool
   }
   deriving (Eq, Show)
 
 data TxOutConfig
-  = TxOutEnable
+  = TxOutEnable UseTxOutAddress
   | TxOutDisable
-  | TxOutConsumed ForceTxIn
-  | TxOutPrune ForceTxIn
-  | TxOutBootstrap ForceTxIn
+  | TxOutConsumed ForceTxIn UseTxOutAddress
+  | TxOutConsumedPrune ForceTxIn UseTxOutAddress
+  | TxOutConsumedBootstrap ForceTxIn UseTxOutAddress
   deriving (Eq, Show)
 
 newtype ForceTxIn = ForceTxIn {unForceTxIn :: Bool}
+  deriving (Eq, Show)
+  deriving newtype (ToJSON, FromJSON)
+
+newtype UseTxOutAddress = UseTxOutAddress {unUseTxOutAddress :: Bool}
   deriving (Eq, Show)
   deriving newtype (ToJSON, FromJSON)
 
@@ -221,6 +257,16 @@ newtype GovernanceConfig = GovernanceConfig
 
 newtype OffchainPoolDataConfig = OffchainPoolDataConfig
   { isOffchainPoolDataEnabled :: Bool
+  }
+  deriving (Eq, Show)
+
+newtype RemoveJsonbFromSchemaConfig = RemoveJsonbFromSchemaConfig
+  { isRemoveJsonbFromSchemaEnabled :: Bool
+  }
+  deriving (Eq, Show)
+
+newtype TxOutTableTypeConfig = TxOutTableTypeConfig
+  { unTxOutTableTypeConfig :: TxOutTableType
   }
   deriving (Eq, Show)
 
@@ -286,28 +332,28 @@ pcNodeConfigFilePath = unNodeConfigFile . pcNodeConfigFile
 
 isTxOutEnabled :: TxOutConfig -> Bool
 isTxOutEnabled TxOutDisable = False
-isTxOutEnabled TxOutEnable = True
-isTxOutEnabled (TxOutConsumed _) = True
-isTxOutEnabled (TxOutPrune _) = True
-isTxOutEnabled (TxOutBootstrap _) = True
+isTxOutEnabled (TxOutEnable _) = True
+isTxOutEnabled (TxOutConsumed _ _) = True
+isTxOutEnabled (TxOutConsumedPrune _ _) = True
+isTxOutEnabled (TxOutConsumedBootstrap _ _) = True
 
-isTxOutBootstrap :: TxOutConfig -> Bool
-isTxOutBootstrap (TxOutBootstrap _) = True
-isTxOutBootstrap _ = False
+isTxOutConsumedBootstrap :: TxOutConfig -> Bool
+isTxOutConsumedBootstrap (TxOutConsumedBootstrap _ _) = True
+isTxOutConsumedBootstrap _ = False
 
 isTxOutConsumed :: TxOutConfig -> Bool
-isTxOutConsumed (TxOutConsumed _) = True
+isTxOutConsumed (TxOutConsumed _ _) = True
 isTxOutConsumed _ = False
 
-isTxOutPrune :: TxOutConfig -> Bool
-isTxOutPrune (TxOutPrune _) = True
-isTxOutPrune _ = False
+isTxOutConsumedPrune :: TxOutConfig -> Bool
+isTxOutConsumedPrune (TxOutConsumedPrune _ _) = True
+isTxOutConsumedPrune _ = False
 
 forceTxIn :: TxOutConfig -> Bool
-forceTxIn (TxOutConsumed f) = unForceTxIn f
-forceTxIn (TxOutPrune f) = unForceTxIn f
-forceTxIn (TxOutBootstrap f) = unForceTxIn f
-forceTxIn TxOutEnable = False
+forceTxIn (TxOutConsumed f _) = unForceTxIn f
+forceTxIn (TxOutConsumedPrune f _) = unForceTxIn f
+forceTxIn (TxOutConsumedBootstrap f _) = unForceTxIn f
+forceTxIn (TxOutEnable _) = False
 forceTxIn TxOutDisable = False
 
 hasLedger :: LedgerInsertConfig -> Bool
@@ -352,10 +398,12 @@ parseGenSyncNodeConfig o =
     <$> fmap NetworkName (o .: "NetworkName")
     <*> parseJSON (Object o)
     <*> fmap NodeConfigFile (o .: "NodeConfigFile")
+    <*> fmap (fromMaybe True) (o .:? "EnableFutureGenesis")
     <*> o .: "EnableLogging"
     <*> o .: "EnableLogMetrics"
     <*> fmap (fromMaybe 8080) (o .:? "PrometheusPort")
     <*> o .:? "insert_options" .!= def
+    <*> o .:? "ipfs_gateway" .!= ["https://ipfs.io/ipfs"]
 
 instance FromJSON SyncProtocol where
   parseJSON o =
@@ -363,28 +411,79 @@ instance FromJSON SyncProtocol where
       String "Cardano" -> pure SyncProtocolCardano
       x -> typeMismatch "Protocol" x
 
+instance FromJSON SyncInsertPreset where
+  parseJSON = Aeson.withText "SyncInsertPreset" $ \case
+    "full" -> pure FullInsertPreset
+    "only_utxo" -> pure OnlyUTxOInsertPreset
+    "only_governance" -> pure OnlyGovInsertPreset
+    "disable_all" -> pure DisableAllInsertPreset
+    other -> fail $ "unexpected preset: " <> show other
+
+instance ToJSON SyncInsertPreset where
+  toJSON FullInsertPreset = "full"
+  toJSON OnlyUTxOInsertPreset = "only_utxo"
+  toJSON OnlyGovInsertPreset = "only_governance"
+  toJSON DisableAllInsertPreset = "disable_all"
+
 instance FromJSON SyncInsertConfig where
   parseJSON = Aeson.withObject "SyncInsertConfig" $ \obj -> do
     preset <- obj .:? "preset"
-    case preset :: Maybe Text of
-      Nothing -> SyncInsertConfig <$> parseJSON (Aeson.Object obj)
-      Just "full" -> pure FullInsertOptions
-      Just "only_utxo" -> pure OnlyUTxOInsertOptions
-      Just "only_gov" -> pure OnlyGovInsertOptions
-      Just "disable_all" -> pure DisableAllInsertOptions
-      Just other -> fail $ "unexpected preset: " <> show other
+    baseOptions <- case preset of
+      Just FullInsertPreset -> pure fullInsertOptions
+      Just OnlyUTxOInsertPreset -> pure onlyUTxOInsertOptions
+      Just OnlyGovInsertPreset -> pure onlyGovInsertOptions
+      Just DisableAllInsertPreset -> pure disableAllInsertOptions
+      Nothing -> pure def -- Default options
+    options <- parseOverrides obj baseOptions
+    pure $ SyncInsertConfig preset options
+
+parseOverrides :: Aeson.Object -> SyncInsertOptions -> Parser SyncInsertOptions
+parseOverrides obj baseOptions = do
+  SyncInsertOptions
+    <$> obj .:? "tx_cbor" .!= sioTxCBOR baseOptions
+    <*> obj .:? "tx_out" .!= sioTxOut baseOptions
+    <*> obj .:? "ledger" .!= sioLedger baseOptions
+    <*> obj .:? "shelley" .!= sioShelley baseOptions
+    <*> pure (sioRewards baseOptions)
+    <*> obj .:? "multi_asset" .!= sioMultiAsset baseOptions
+    <*> obj .:? "metadata" .!= sioMetadata baseOptions
+    <*> obj .:? "plutus" .!= sioPlutus baseOptions
+    <*> obj .:? "governance" .!= sioGovernance baseOptions
+    <*> obj .:? "offchain_pool_data" .!= sioOffchainPoolData baseOptions
+    <*> obj .:? "pool_stat" .!= sioPoolStats baseOptions
+    <*> obj .:? "json_type" .!= sioJsonType baseOptions
+    <*> obj .:? "remove_jsonb_from_schema" .!= sioRemoveJsonbFromSchema baseOptions
 
 instance ToJSON SyncInsertConfig where
-  toJSON (SyncInsertConfig opts) = toJSON opts
-  toJSON FullInsertOptions = Aeson.object ["preset" .= ("full" :: Text)]
-  toJSON OnlyUTxOInsertOptions = Aeson.object ["preset" .= ("only_utxo" :: Text)]
-  toJSON OnlyGovInsertOptions = Aeson.object ["preset" .= ("only_gov" :: Text)]
-  toJSON DisableAllInsertOptions = Aeson.object ["preset" .= ("disable_all" :: Text)]
+  toJSON (SyncInsertConfig preset options) =
+    Aeson.object $ maybe [] (\p -> [fromText "preset" .= p]) preset ++ optionsToList options
+
+optionsToList :: SyncInsertOptions -> [Pair]
+optionsToList SyncInsertOptions {..} =
+  catMaybes
+    [ toJsonIfSet "tx_cbor" sioTxCBOR
+    , toJsonIfSet "tx_out" sioTxOut
+    , toJsonIfSet "ledger" sioLedger
+    , toJsonIfSet "shelley" sioShelley
+    , toJsonIfSet "rewards" sioRewards
+    , toJsonIfSet "multi_asset" sioMultiAsset
+    , toJsonIfSet "metadata" sioMetadata
+    , toJsonIfSet "plutus" sioPlutus
+    , toJsonIfSet "governance" sioGovernance
+    , toJsonIfSet "offchain_pool_data" sioOffchainPoolData
+    , toJsonIfSet "pool_stat" sioPoolStats
+    , toJsonIfSet "json_type" sioJsonType
+    , toJsonIfSet "remove_jsonb_from_schema" sioRemoveJsonbFromSchema
+    ]
+
+toJsonIfSet :: ToJSON a => Text -> a -> Maybe Pair
+toJsonIfSet key value = Just $ fromText key .= value
 
 instance FromJSON SyncInsertOptions where
   parseJSON = Aeson.withObject "SyncInsertOptions" $ \obj ->
     SyncInsertOptions
-      <$> obj .:? "tx_out" .!= sioTxOut def
+      <$> obj .:? "tx_cbor" .!= sioTxCBOR def
+      <*> obj .:? "tx_out" .!= sioTxOut def
       <*> obj .:? "ledger" .!= sioLedger def
       <*> obj .:? "shelley" .!= sioShelley def
       <*> pure (sioRewards def)
@@ -393,12 +492,15 @@ instance FromJSON SyncInsertOptions where
       <*> obj .:? "plutus" .!= sioPlutus def
       <*> obj .:? "governance" .!= sioGovernance def
       <*> obj .:? "offchain_pool_data" .!= sioOffchainPoolData def
+      <*> obj .:? "pool_stat" .!= sioPoolStats def
       <*> obj .:? "json_type" .!= sioJsonType def
+      <*> obj .:? "remove_jsonb_from_schema" .!= sioRemoveJsonbFromSchema def
 
 instance ToJSON SyncInsertOptions where
   toJSON SyncInsertOptions {..} =
     Aeson.object
-      [ "tx_out" .= sioTxOut
+      [ "tx_cbor" .= sioTxCBOR
+      , "tx_out" .= sioTxOut
       , "ledger" .= sioLedger
       , "shelley" .= sioShelley
       , "multi_asset" .= sioMultiAsset
@@ -406,41 +508,73 @@ instance ToJSON SyncInsertOptions where
       , "plutus" .= sioPlutus
       , "governance" .= sioGovernance
       , "offchain_pool_data" .= sioOffchainPoolData
+      , "pool_stat" .= sioPoolStats
       , "json_type" .= sioJsonType
+      , "remove_jsonb_from_schema" .= sioRemoveJsonbFromSchema
       ]
+
+instance ToJSON RewardsConfig where
+  toJSON (RewardsConfig enabled) = Aeson.Bool enabled
+
+instance ToJSON TxCBORConfig where
+  toJSON = boolToEnableDisable . isTxCBOREnabled
+
+instance ToJSON PoolStatsConfig where
+  toJSON = boolToEnableDisable . isPoolStatsEnabled
+
+instance FromJSON TxCBORConfig where
+  parseJSON = Aeson.withText "tx_cbor" $ \v ->
+    case enableDisableToBool v of
+      Just g -> pure (TxCBORConfig g)
+      Nothing -> fail $ "unexpected tx_cbor: " <> show v
+
+instance FromJSON PoolStatsConfig where
+  parseJSON = Aeson.withText "pool_stat" $ \v ->
+    case enableDisableToBool v of
+      Just g -> pure (PoolStatsConfig g)
+      Nothing -> fail $ "unexpected pool_stat: " <> show v
 
 instance ToJSON TxOutConfig where
   toJSON cfg =
     Aeson.object
       [ "value" .= value cfg
       , "force_tx_in" .= forceTxIn' cfg
+      , "use_address_table" .= useTxOutAddress' cfg
       ]
     where
       value :: TxOutConfig -> Text
-      value TxOutEnable = "enable"
+      value (TxOutEnable _) = "enable"
       value TxOutDisable = "disable"
-      value (TxOutConsumed _) = "consumed"
-      value (TxOutPrune _) = "prune"
-      value (TxOutBootstrap _) = "bootstrap"
+      value (TxOutConsumed _ _) = "consumed"
+      value (TxOutConsumedPrune _ _) = "prune"
+      value (TxOutConsumedBootstrap _ _) = "bootstrap"
 
       forceTxIn' :: TxOutConfig -> Maybe Bool
-      forceTxIn' TxOutEnable = Nothing
+      forceTxIn' (TxOutEnable _) = Nothing
       forceTxIn' TxOutDisable = Nothing
-      forceTxIn' (TxOutConsumed f) = Just (unForceTxIn f)
-      forceTxIn' (TxOutPrune f) = Just (unForceTxIn f)
-      forceTxIn' (TxOutBootstrap f) = Just (unForceTxIn f)
+      forceTxIn' (TxOutConsumed f _) = Just (unForceTxIn f)
+      forceTxIn' (TxOutConsumedPrune f _) = Just (unForceTxIn f)
+      forceTxIn' (TxOutConsumedBootstrap f _) = Just (unForceTxIn f)
+
+      useTxOutAddress' :: TxOutConfig -> Maybe Bool
+      useTxOutAddress' (TxOutEnable u) = Just (unUseTxOutAddress u)
+      useTxOutAddress' TxOutDisable = Nothing
+      useTxOutAddress' (TxOutConsumed _ u) = Just (unUseTxOutAddress u)
+      useTxOutAddress' (TxOutConsumedPrune _ u) = Just (unUseTxOutAddress u)
+      useTxOutAddress' (TxOutConsumedBootstrap _ u) = Just (unUseTxOutAddress u)
 
 instance FromJSON TxOutConfig where
   parseJSON = Aeson.withObject "tx_out" $ \obj -> do
     val <- obj .: "value"
     forceTxIn' <- obj .:? "force_tx_in" .!= ForceTxIn False
+    useAddress' <- obj .:? "use_address_table" .!= UseTxOutAddress False
 
     case val :: Text of
-      "enable" -> pure TxOutEnable
+      "enable" -> pure (TxOutEnable useAddress')
       "disable" -> pure TxOutDisable
-      "consumed" -> pure (TxOutConsumed forceTxIn')
-      "prune" -> pure (TxOutPrune forceTxIn')
-      "bootstrap" -> pure (TxOutBootstrap forceTxIn')
+      "consumed" -> pure (TxOutConsumed forceTxIn' useAddress')
+      "prune" -> pure (TxOutConsumedPrune forceTxIn' useAddress')
+      "bootstrap" -> pure (TxOutConsumedBootstrap forceTxIn' useAddress')
       other -> fail $ "unexpected tx_out: " <> show other
 
 instance ToJSON LedgerInsertConfig where
@@ -551,6 +685,24 @@ instance FromJSON GovernanceConfig where
 instance ToJSON OffchainPoolDataConfig where
   toJSON = boolToEnableDisable . isOffchainPoolDataEnabled
 
+instance FromJSON RemoveJsonbFromSchemaConfig where
+  parseJSON = Aeson.withText "remove_jsonb_from_schema" $ \v ->
+    case enableDisableToBool v of
+      Just g -> pure (RemoveJsonbFromSchemaConfig g)
+      Nothing -> fail $ "unexpected remove_jsonb_from_schema: " <> show v
+
+instance ToJSON RemoveJsonbFromSchemaConfig where
+  toJSON = boolToEnableDisable . isRemoveJsonbFromSchemaEnabled
+
+instance FromJSON TxOutTableTypeConfig where
+  parseJSON = Aeson.withText "use_address_table" $ \v ->
+    case enableDisableToTxOutTableType v of
+      Just g -> pure (TxOutTableTypeConfig g)
+      Nothing -> fail $ "unexpected use_address_table: " <> show v
+
+instance ToJSON TxOutTableTypeConfig where
+  toJSON = addressTypeToEnableDisable . unTxOutTableTypeConfig
+
 instance FromJSON OffchainPoolDataConfig where
   parseJSON = Aeson.withText "offchain_pool_data" $ \v ->
     case enableDisableToBool v of
@@ -570,12 +722,13 @@ instance FromJSON JsonTypeConfig where
     other -> fail $ "unexpected json_type: " <> show other
 
 instance Default SyncInsertConfig where
-  def = SyncInsertConfig def
+  def = SyncInsertConfig Nothing def
 
 instance Default SyncInsertOptions where
   def =
     SyncInsertOptions
-      { sioTxOut = TxOutEnable
+      { sioTxCBOR = TxCBORConfig False
+      , sioTxOut = TxOutEnable (UseTxOutAddress False)
       , sioLedger = LedgerEnable
       , sioShelley = ShelleyEnable
       , sioRewards = RewardsConfig True
@@ -584,8 +737,82 @@ instance Default SyncInsertOptions where
       , sioPlutus = PlutusEnable
       , sioGovernance = GovernanceConfig True
       , sioOffchainPoolData = OffchainPoolDataConfig True
+      , sioPoolStats = PoolStatsConfig False
       , sioJsonType = JsonTypeText
+      , sioRemoveJsonbFromSchema = RemoveJsonbFromSchemaConfig False
       }
+
+fullInsertOptions :: SyncInsertOptions
+fullInsertOptions =
+  SyncInsertOptions
+    { sioTxCBOR = TxCBORConfig False
+    , sioTxOut = TxOutEnable (UseTxOutAddress False)
+    , sioLedger = LedgerEnable
+    , sioShelley = ShelleyEnable
+    , sioRewards = RewardsConfig True
+    , sioMultiAsset = MultiAssetEnable
+    , sioMetadata = MetadataEnable
+    , sioPlutus = PlutusEnable
+    , sioGovernance = GovernanceConfig True
+    , sioOffchainPoolData = OffchainPoolDataConfig True
+    , sioPoolStats = PoolStatsConfig True
+    , sioJsonType = JsonTypeText
+    , sioRemoveJsonbFromSchema = RemoveJsonbFromSchemaConfig False
+    }
+
+onlyUTxOInsertOptions :: SyncInsertOptions
+onlyUTxOInsertOptions =
+  SyncInsertOptions
+    { sioTxCBOR = TxCBORConfig False
+    , sioTxOut = TxOutConsumedBootstrap (ForceTxIn False) (UseTxOutAddress False)
+    , sioLedger = LedgerIgnore
+    , sioShelley = ShelleyDisable
+    , sioRewards = RewardsConfig True
+    , sioMultiAsset = MultiAssetEnable
+    , sioMetadata = MetadataDisable
+    , sioPlutus = PlutusDisable
+    , sioGovernance = GovernanceConfig False
+    , sioOffchainPoolData = OffchainPoolDataConfig False
+    , sioPoolStats = PoolStatsConfig False
+    , sioJsonType = JsonTypeText
+    , sioRemoveJsonbFromSchema = RemoveJsonbFromSchemaConfig False
+    }
+
+onlyGovInsertOptions :: SyncInsertOptions
+onlyGovInsertOptions =
+  disableAllInsertOptions
+    { sioLedger = LedgerEnable
+    , sioGovernance = GovernanceConfig True
+    , sioPoolStats = PoolStatsConfig True
+    }
+
+disableAllInsertOptions :: SyncInsertOptions
+disableAllInsertOptions =
+  SyncInsertOptions
+    { sioTxCBOR = TxCBORConfig False
+    , sioTxOut = TxOutDisable
+    , sioLedger = LedgerDisable
+    , sioShelley = ShelleyDisable
+    , sioRewards = RewardsConfig False
+    , sioMultiAsset = MultiAssetDisable
+    , sioMetadata = MetadataDisable
+    , sioPlutus = PlutusDisable
+    , sioOffchainPoolData = OffchainPoolDataConfig False
+    , sioPoolStats = PoolStatsConfig False
+    , sioGovernance = GovernanceConfig False
+    , sioJsonType = JsonTypeText
+    , sioRemoveJsonbFromSchema = RemoveJsonbFromSchemaConfig False
+    }
+
+addressTypeToEnableDisable :: IsString s => TxOutTableType -> s
+addressTypeToEnableDisable TxOutVariantAddress = "enable"
+addressTypeToEnableDisable TxOutCore = "disable"
+
+enableDisableToTxOutTableType :: (Eq s, IsString s) => s -> Maybe TxOutTableType
+enableDisableToTxOutTableType = \case
+  "enable" -> Just TxOutVariantAddress
+  "disable" -> Just TxOutCore
+  _ -> Nothing
 
 boolToEnableDisable :: IsString s => Bool -> s
 boolToEnableDisable True = "enable"

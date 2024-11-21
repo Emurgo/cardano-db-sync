@@ -1,7 +1,7 @@
-cabal-version:          3.0
+cabal-version:          3.6
 
 name:                   cardano-chain-gen
-version:                13.2.0.1
+version:                13.6.0.1
 synopsis:               A fake chain generator for testing cardano DB sync.
 description:            A fake chain generator for testing cardano DB sync.
 homepage:               https://github.com/IntersectMBO/cardano-db-sync
@@ -64,6 +64,7 @@ library
                       , bytestring
                       , cardano-binary
                       , cardano-crypto-class
+                      , cardano-data
                       , cardano-db
                       , cardano-ledger-allegra
                       , cardano-ledger-alonzo
@@ -71,7 +72,7 @@ library
                       , cardano-ledger-conway
                       , cardano-ledger-binary
                       , cardano-ledger-core
-                      , cardano-ledger-shelley
+                      , cardano-ledger-shelley >= 1.12.3.0
                       , cardano-ledger-mary
                       , cardano-prelude
                       , cardano-slotting
@@ -140,7 +141,6 @@ test-suite cardano-chain-gen
                         Test.Cardano.Db.Mock.Unit.Babbage
                         Test.Cardano.Db.Mock.Unit.Babbage.CommandLineArg.ConfigFile
                         Test.Cardano.Db.Mock.Unit.Babbage.CommandLineArg.EpochDisabled
-                        Test.Cardano.Db.Mock.Unit.Babbage.CommandLineArg.ForceIndex
                         Test.Cardano.Db.Mock.Unit.Babbage.Config.MigrateConsumedPruneTxOut
                         Test.Cardano.Db.Mock.Unit.Babbage.Config.Parse
                         Test.Cardano.Db.Mock.Unit.Babbage.InlineAndReference
@@ -154,9 +154,10 @@ test-suite cardano-chain-gen
                         Test.Cardano.Db.Mock.Unit.Conway
                         Test.Cardano.Db.Mock.Unit.Conway.CommandLineArg.ConfigFile
                         Test.Cardano.Db.Mock.Unit.Conway.CommandLineArg.EpochDisabled
-                        Test.Cardano.Db.Mock.Unit.Conway.CommandLineArg.ForceIndex
+                        Test.Cardano.Db.Mock.Unit.Conway.Config.JsonbInSchema
                         Test.Cardano.Db.Mock.Unit.Conway.Config.Parse
                         Test.Cardano.Db.Mock.Unit.Conway.Config.MigrateConsumedPruneTxOut
+                        Test.Cardano.Db.Mock.Unit.Conway.Governance
                         Test.Cardano.Db.Mock.Unit.Conway.InlineAndReference
                         Test.Cardano.Db.Mock.Unit.Conway.Other
                         Test.Cardano.Db.Mock.Unit.Conway.Plutus
@@ -181,7 +182,7 @@ test-suite cardano-chain-gen
                       , cardano-ledger-conway
                       , cardano-ledger-core
                       , cardano-ledger-mary
-                      , cardano-ledger-shelley
+                      , cardano-ledger-shelley >= 1.12.3.0
                       , cardano-node
                       , cardano-prelude
                       , cardano-slotting
@@ -198,7 +199,6 @@ test-suite cardano-chain-gen
                       , stm
                       , strict-stm
                       , tasty
-                      , tasty-expected-failure
                       , tasty-quickcheck
                       , text
                       , transformers

@@ -5,7 +5,9 @@
 
 module Cardano.DbSync.Era.Shelley.Generic.ProtoParams (
   ProtoParams (..),
+  Deposits (..),
   epochProtoParams,
+  getDeposits,
 ) where
 
 import Cardano.DbSync.Types
@@ -15,6 +17,7 @@ import Cardano.Ledger.BaseTypes (EpochInterval, UnitInterval)
 import qualified Cardano.Ledger.BaseTypes as Ledger
 import Cardano.Ledger.Coin (Coin (..))
 import Cardano.Ledger.Conway.Core
+import Cardano.Ledger.Conway.PParams (ppMinFeeRefScriptCostPerByteL)
 import Cardano.Ledger.Plutus.Language (Language)
 import qualified Cardano.Ledger.Shelley.LedgerState as Shelley
 import Cardano.Prelude
@@ -64,6 +67,12 @@ data ProtoParams = ProtoParams
   , ppGovActionDeposit :: !(Maybe Natural)
   , ppDRepDeposit :: !(Maybe Natural)
   , ppDRepActivity :: !(Maybe EpochInterval)
+  , ppMinFeeRefScriptCostPerByte :: !(Maybe Rational)
+  }
+
+data Deposits = Deposits
+  { stakeKeyDeposit :: Coin
+  , poolDeposit :: Coin
   }
 
 epochProtoParams :: ExtLedgerState CardanoBlock -> Maybe ProtoParams
@@ -82,6 +91,24 @@ getProtoParams ::
   LedgerState (ShelleyBlock p era) ->
   PParams era
 getProtoParams st = Shelley.nesEs (Consensus.shelleyLedgerState st) ^. Shelley.curPParamsEpochStateL
+
+getDeposits :: ExtLedgerState CardanoBlock -> Maybe Deposits
+getDeposits lstate =
+  case ledgerState lstate of
+    LedgerStateByron _ -> Nothing
+    LedgerStateShelley st -> Just $ getDopositsShelley $ getProtoParams st
+    LedgerStateAllegra st -> Just $ getDopositsShelley $ getProtoParams st
+    LedgerStateMary st -> Just $ getDopositsShelley $ getProtoParams st
+    LedgerStateAlonzo st -> Just $ getDopositsShelley $ getProtoParams st
+    LedgerStateBabbage st -> Just $ getDopositsShelley $ getProtoParams st
+    LedgerStateConway st -> Just $ getDopositsShelley $ getProtoParams st
+  where
+    getDopositsShelley :: EraPParams era => PParams era -> Deposits
+    getDopositsShelley pp =
+      Deposits
+        { stakeKeyDeposit = pp ^. ppKeyDepositL
+        , poolDeposit = pp ^. ppPoolDepositL
+        }
 
 -- -------------------------------------------------------------------------------------------------
 
@@ -124,6 +151,7 @@ fromConwayParams params =
     , ppGovActionDeposit = Just . fromIntegral . unCoin $ params ^. ppGovActionDepositL
     , ppDRepDeposit = Just . fromIntegral . unCoin $ params ^. ppDRepDepositL
     , ppDRepActivity = Just $ params ^. ppDRepActivityL
+    , ppMinFeeRefScriptCostPerByte = Just $ Ledger.unboundRational $ params ^. ppMinFeeRefScriptCostPerByteL
     }
 
 fromBabbageParams :: PParams StandardBabbage -> ProtoParams
@@ -165,6 +193,7 @@ fromBabbageParams params =
     , ppGovActionDeposit = Nothing
     , ppDRepDeposit = Nothing
     , ppDRepActivity = Nothing
+    , ppMinFeeRefScriptCostPerByte = Nothing
     }
 
 fromAlonzoParams :: PParams StandardAlonzo -> ProtoParams
@@ -206,6 +235,7 @@ fromAlonzoParams params =
     , ppGovActionDeposit = Nothing
     , ppDRepDeposit = Nothing
     , ppDRepActivity = Nothing
+    , ppMinFeeRefScriptCostPerByte = Nothing
     }
 
 fromShelleyParams :: (ProtVerAtMost era 6, ProtVerAtMost era 4, EraPParams era) => PParams era -> ProtoParams
@@ -247,4 +277,5 @@ fromShelleyParams params =
     , ppGovActionDeposit = Nothing
     , ppDRepDeposit = Nothing
     , ppDRepActivity = Nothing
+    , ppMinFeeRefScriptCostPerByte = Nothing
     }

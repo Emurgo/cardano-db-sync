@@ -1,7 +1,6 @@
 # Schema Documentation for cardano-db-sync
 
-Schema version: 13.2.0.1 (from branch **master** which may not accurately reflect the version number)
-**Note:** This file is auto-generated from the documentation in cardano-db/src/Cardano/Db/Schema.hs by the command `cabal run -- gen-schema-docs doc/schema.md`. This document should only be updated during the release process and updated on the release branch.
+**Note:** This file is auto-generated from the documentation in cardano-db/src/Cardano/Db/Schema/BaseSchema.hs by the command `cabal run -- gen-schema-docs doc/schema.md`. This document should only be updated during the release process and updated on the release branch.
 
 ### `schema_version`
 
@@ -86,6 +85,19 @@ A table for transactions within a block on the chain.
 | `invalid_hereafter` | word64type | Transaction in invalid at or after this slot number. |
 | `valid_contract` | boolean | False if the contract is invalid. True if the contract is valid or there is no contract. |
 | `script_size` | word31type | The sum of the script sizes (in bytes) of scripts in the transaction. |
+| `treasury_donation` | lovelace |  |
+
+### `tx_cbor`
+
+A table holding raw CBOR encoded transactions.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `tx_id` | integer (64) | The Tx table index of the transaction encoded in this table. |
+| `bytes` | bytea | CBOR encoded transaction. |
 
 ### `reverse_index`
 
@@ -111,47 +123,6 @@ A table of unique stake addresses. Can be an actual address or a script hash.  T
 | `hash_raw` | addr29type | The raw bytes of the stake address hash. |
 | `view` | string | The Bech32 encoded version of the stake address. |
 | `script_hash` | hash28type | The script hash, in case this address is locked by a script. |
-
-### `tx_out`
-
-A table for transaction outputs.
-
-* Primary Id: `id`
-
-| Column name | Type | Description |
-|-|-|-|
-| `id` | integer (64) |  |
-| `tx_id` | integer (64) | The Tx table index of the transaction that contains this transaction output. |
-| `index` | txindex | The index of this transaction output with the transaction. |
-| `address` | string | The human readable encoding of the output address. Will be Base58 for Byron era addresses and Bech32 for Shelley era. |
-| `address_has_script` | boolean | Flag which shows if this address is locked by a script. |
-| `payment_cred` | hash28type | The payment credential part of the Shelley address. (NULL for Byron addresses). For a script-locked address, this is the script hash. |
-| `stake_address_id` | integer (64) | The StakeAddress table index for the stake address part of the Shelley address. (NULL for Byron addresses). |
-| `value` | lovelace | The output value (in Lovelace) of the transaction output. |
-| `data_hash` | hash32type | The hash of the transaction output datum. (NULL for Txs without scripts). |
-| `inline_datum_id` | integer (64) | The inline datum of the output, if it has one. New in v13. |
-| `reference_script_id` | integer (64) | The reference script of the output, if it has one. New in v13. |
-
-### `collateral_tx_out`
-
-A table for transaction collateral outputs. New in v13.
-
-* Primary Id: `id`
-
-| Column name | Type | Description |
-|-|-|-|
-| `id` | integer (64) |  |
-| `tx_id` | integer (64) | The Tx table index of the transaction that contains this transaction output. |
-| `index` | txindex | The index of this transaction output with the transaction. |
-| `address` | string | The human readable encoding of the output address. Will be Base58 for Byron era addresses and Bech32 for Shelley era. |
-| `address_has_script` | boolean | Flag which shows if this address is locked by a script. |
-| `payment_cred` | hash28type | The payment credential part of the Shelley address. (NULL for Byron addresses). For a script-locked address, this is the script hash. |
-| `stake_address_id` | integer (64) | The StakeAddress table index for the stake address part of the Shelley address. (NULL for Byron addresses). |
-| `value` | lovelace | The output value (in Lovelace) of the transaction output. |
-| `data_hash` | hash32type | The hash of the transaction output datum. (NULL for Txs without scripts). |
-| `multi_assets_descr` | string | This is a description of the multiassets in collateral output. Since the output is not really created, we don't need to add them in separate tables. |
-| `inline_datum_id` | integer (64) | The inline datum of the output, if it has one. New in v13. |
-| `reference_script_id` | integer (64) | The reference script of the output, if it has one. New in v13. |
 
 ### `tx_in`
 
@@ -239,7 +210,9 @@ The treasury and rewards fields will be correct for the whole epoch, but all oth
 | `reserves` | lovelace | The amount (in Lovelace) in the reserves pot. |
 | `rewards` | lovelace | The amount (in Lovelace) in the rewards pot. |
 | `utxo` | lovelace | The amount (in Lovelace) in the UTxO set. |
-| `deposits` | lovelace | The amount (in Lovelace) in the deposit pot. |
+| `deposits_stake` | lovelace | The amount (in Lovelace) in the obligation pot coming from stake key and pool deposits. Renamed from deposits in 13.3. |
+| `deposits_drep` | lovelace | The amount (in Lovelace) in the obligation pot coming from drep registrations deposits. New in 13.3. |
+| `deposits_proposal` | lovelace | The amount (in Lovelace) in the obligation pot coming from governance proposal deposits. New in 13.3. |
 | `fees` | lovelace | The amount (in Lovelace) in the fee pot. |
 | `block_id` | integer (64) | The Block table index of the block for which this snapshot was taken. |
 
@@ -275,6 +248,7 @@ An on-chain pool update.
 | `meta_id` | integer (64) | The PoolMetadataRef table index this pool update refers to. |
 | `margin` | double | The margin (as a percentage) this pool charges. |
 | `fixed_cost` | lovelace | The fixed per epoch fee (in ADA) this pool charges. |
+| `deposit` | lovelace | The deposit payed for this pool update. Null for reregistrations. |
 | `registered_tx_id` | integer (64) | The Tx table index of the transaction in which provided this pool update. |
 
 ### `pool_owner`
@@ -331,6 +305,7 @@ A table containing stake address registrations.
 | `addr_id` | integer (64) | The StakeAddress table index for the stake address. |
 | `cert_index` | integer (32) | The index of this stake registration within the certificates of this transaction. |
 | `epoch_no` | word31type | The epoch in which the registration took place. |
+| `deposit` | lovelace |  |
 | `tx_id` | integer (64) | The Tx table index of the transaction where this stake address was registered. |
 
 ### `stake_deregistration`
@@ -395,9 +370,9 @@ A table for earned staking rewards. After 13.2 release it includes only 3 types 
 | `spendable_epoch` | integer (64) | The epoch in which the reward is actually distributed and can be spent. |
 | `pool_id` | integer (64) | The PoolHash table index for the pool the stake address was delegated to when the reward is earned or for the pool that there is a deposit refund. |
 
-### `instant_reward`
+### `reward_rest`
 
-A table for earned instant rewards. It includes only 2 types of rewards: reserves and treasury. This table only exists for historic reasons, since instant rewards are depredated after Conway. The `reward.id` field has been removed and it only appears on docs due to a bug. New in 13.2
+A table for rewards which are not correlated to a pool. It includes 3 types of rewards: reserves, treasury and proposal_refund. Instant rewards are depredated after Conway. The `reward.id` field has been removed and it only appears on docs due to a bug. New in 13.2
 
 * Primary Id: `id`
 
@@ -426,7 +401,7 @@ A table for withdrawals from a reward account.
 
 ### `epoch_stake`
 
-A table containing the epoch stake distribution for each epoch. This is inserted incrementally in the first blocks of the epoch. The stake distribution is extracted from the `set` snapshot of the ledger. See Shelley specs Sec. 11.2 for more details.
+A table containing the epoch stake distribution for each epoch. This is inserted incrementally in the first blocks of the previous epoch. The stake distribution is extracted from the `set` snapshot of the ledger. See Shelley specs Sec. 11.2 for more details.
 
 * Primary Id: `id`
 
@@ -530,19 +505,6 @@ A table containing Multi-Asset mint events.
 | `ident` | integer (64) | The MultiAsset table index specifying the asset. |
 | `quantity` | int65type | The amount of the Multi Asset to mint (can be negative to "burn" assets). |
 | `tx_id` | integer (64) | The Tx table index for the transaction that contains this minting event. |
-
-### `ma_tx_out`
-
-A table containing Multi-Asset transaction outputs.
-
-* Primary Id: `id`
-
-| Column name | Type | Description |
-|-|-|-|
-| `id` | integer (64) |  |
-| `ident` | integer (64) | The MultiAsset table index specifying the asset. |
-| `quantity` | word64type | The Multi Asset transaction output amount (denominated in the Multi Asset). |
-| `tx_out_id` | integer (64) | The TxOut table index for the transaction that this Multi Asset transaction output. |
 
 ### `redeemer`
 
@@ -679,6 +641,7 @@ A table containing block chain parameter change proposals.
 | `gov_action_deposit` | word64type | Governance action deposit. New in 13.2-Conway. |
 | `drep_deposit` | word64type | DRep deposit amount. New in 13.2-Conway. |
 | `drep_activity` | word64type | DRep activity period. New in 13.2-Conway. |
+| `min_fee_ref_script_cost_per_byte` | double |  |
 | `registered_tx_id` | integer (64) | The Tx table index for the transaction that contains this parameter proposal. |
 
 ### `epoch_param`
@@ -742,6 +705,7 @@ The accepted protocol parameters for an epoch.
 | `gov_action_deposit` | word64type | Governance action deposit. New in 13.2-Conway. |
 | `drep_deposit` | word64type | DRep deposit amount. New in 13.2-Conway. |
 | `drep_activity` | word64type | DRep activity period. New in 13.2-Conway. |
+| `min_fee_ref_script_cost_per_byte` | double |  |
 | `block_id` | integer (64) | The Block table index for the first block where these parameters are valid. |
 
 ### `cost_model`
@@ -755,6 +719,22 @@ CostModel for EpochParam and ParamProposal.
 | `id` | integer (64) |  |
 | `hash` | hash32type | The hash of cost model. It ensures uniqueness of entries. New in v13. |
 | `costs` | jsonb | The actual costs formatted as json. |
+
+### `pool_stat`
+
+Stats per pool and per epoch.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `pool_hash_id` | integer (64) | The pool_hash_id reference. |
+| `epoch_no` | word31type | The epoch number. |
+| `number_of_blocks` | word64type | Number of blocks created on the previous epoch. |
+| `number_of_delegators` | word64type | Number of delegators in the mark snapshot. |
+| `stake` | word64type | Total stake in the mark snapshot. |
+| `voting_power` | word64type | Voting power of the SPO. |
 
 ### `extra_migrations`
 
@@ -783,7 +763,7 @@ A table for every unique drep key hash. The existance of an entry doesn't mean t
 
 ### `committee_hash`
 
-A table for all committee hot credentials
+A table for all committee credentials hot or cold
 
 * Primary Id: `id`
 
@@ -860,14 +840,14 @@ A table for every Anchor that appears on Governance Actions. These are pointers 
 | Column name | Type | Description |
 |-|-|-|
 | `id` | integer (64) |  |
-| `tx_id` | integer (64) | The Tx table index of the tx that includes this anchor. This only exists to facilitate rollbacks |
+| `block_id` | integer (64) | The Block table index of the tx that includes this anchor. This only exists to facilitate rollbacks |
 | `data_hash` | blob | A hash of the contents of the metadata URL |
 | `url` | varchar | A URL to a JSON payload of metadata |
-| `type` | anchorType |  |
+| `type` | anchorType | The type of the anchor. It can be gov_action, drep, other, vote, committee_dereg, constitution |
 
 ### `gov_action_proposal`
 
-A table for proposed GovActionProposal, aka ProposalProcedure, GovAction or GovProposal. At most one of the ratified/enacted/dropped/expired epoch field can be non-null, indicating the current state of the proposal. This table may be referenced by TreasuryWithdrawal or NewCommittee. New in 13.2-Conway.
+A table for proposed GovActionProposal, aka ProposalProcedure, GovAction or GovProposal. This table may be referenced by TreasuryWithdrawal or NewCommittee. New in 13.2-Conway.
 
 * Primary Id: `id`
 
@@ -884,10 +864,10 @@ A table for proposed GovActionProposal, aka ProposalProcedure, GovAction or GovP
 | `type` | govactiontype | Can be one of ParameterChange, HardForkInitiation, TreasuryWithdrawals, NoConfidence, NewCommittee, NewConstitution, InfoAction |
 | `description` | jsonb | A Text describing the content of this GovActionProposal in a readable way. |
 | `param_proposal` | integer (64) | If this is a param proposal action, this has the index of the param_proposal table. |
-| `ratified_epoch` | word31type | If not null, then this proposal has been ratified at the specfied epoch. TODO: This is currently always null. |
+| `ratified_epoch` | word31type | If not null, then this proposal has been ratified at the specfied epoch. |
 | `enacted_epoch` | word31type | If not null, then this proposal has been enacted at the specfied epoch. |
-| `dropped_epoch` | word31type | If not null, then this proposal has been enacted at the specfied epoch. TODO: This is currently always null. |
-| `expired_epoch` | word31type | If not null, then this proposal has been enacted at the specfied epoch. TODO: This is currently always null. |
+| `dropped_epoch` | word31type | If not null, then this proposal has been dropped at the specfied epoch. A proposal is dropped when it's expired or enacted or when one of its dependencies is expired. |
+| `expired_epoch` | word31type | If not null, then this proposal has been expired at the specfied epoch. |
 
 ### `treasury_withdrawal`
 
@@ -902,7 +882,7 @@ A table for all treasury withdrawals proposed on a GovActionProposal. New in 13.
 | `stake_address_id` | integer (64) | The address that benefits from this withdrawal. |
 | `amount` | lovelace | The amount for this withdrawl. |
 
-### `new_committee_info`
+### `committee`
 
 A table for new committee proposed on a GovActionProposal. New in 13.2-Conway.
 
@@ -911,24 +891,26 @@ A table for new committee proposed on a GovActionProposal. New in 13.2-Conway.
 | Column name | Type | Description |
 |-|-|-|
 | `id` | integer (64) |  |
-| `gov_action_proposal_id` | integer (64) | The GovActionProposal table index for this new committee. |
+| `gov_action_proposal_id` | integer (64) | The GovActionProposal table index for this new committee. This can be null for genesis committees. |
 | `quorum_numerator` | integer (64) | The proposed quorum nominator. |
 | `quorum_denominator` | integer (64) | The proposed quorum denominator. |
 
-### `new_committee_member`
+### `committee_member`
+
+A table for members of the committee. A committee can have multiple members. New in 13.3-Conway.
 
 * Primary Id: `id`
 
 | Column name | Type | Description |
 |-|-|-|
 | `id` | integer (64) |  |
-| `gov_action_proposal_id` | integer (64) |  |
-| `committee_hash_id` | integer (64) |  |
-| `expiration_epoch` | word31type |  |
+| `committee_id` | integer (64) | The reference to the committee |
+| `committee_hash_id` | integer (64) | The reference to the committee hash |
+| `expiration_epoch` | word31type | The epoch this member expires |
 
 ### `constitution`
 
-A table for constitutiona attached to a GovActionProposal. New in 13.2-Conway.
+A table for constitution attached to a GovActionProposal. New in 13.2-Conway.
 
 * Primary Id: `id`
 
@@ -957,6 +939,7 @@ A table for voting procedures, aka GovVote. A Vote can be Yes No or Abstain. New
 | `pool_voter` | integer (64) | A reference to the pool hash entry that voted |
 | `vote` | vote | The Vote. Can be one of Yes, No, Abstain. |
 | `voting_anchor_id` | integer (64) | The VotingAnchor table index associated with this VotingProcedure. |
+| `invalid` | integer (64) | TODO: This is currently not implemented and always stays null. Not null if the vote is invalid. |
 
 ### `drep_distr`
 
@@ -971,6 +954,32 @@ The table for the distribution of voting power per DRep per. Currently this has 
 | `amount` | integer (64) | The total amount of voting power this DRep is delegated. |
 | `epoch_no` | word31type | The epoch no this distribution is about. |
 | `active_until` | word31type | The epoch until which this drep is active. TODO: This currently remains null always. |
+
+### `epoch_state`
+
+Table with governance (and in the future other) stats per epoch.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `committee_id` | integer (64) | The reference to the current committee. |
+| `no_confidence_id` | integer (64) | The reference to the current gov_action_proposal of no confidence. TODO: This remains NULL. |
+| `constitution_id` | integer (64) | The reference to the current constitution. Should never be null. |
+| `epoch_no` | word31type | The epoch in question. |
+
+### `event_info`
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `tx_id` | integer (64) |  |
+| `epoch` | word31type |  |
+| `type` | string |  |
+| `explanation` | string |  |
 
 ### `off_chain_pool_data`
 
@@ -1015,15 +1024,44 @@ The table with the offchain metadata related to Vote Anchors. It accepts metadat
 | `voting_anchor_id` | integer (64) | The VotingAnchor table index this offchain data refers. |
 | `hash` | blob | The hash of the offchain data. |
 | `language` | string | The langauge described in the context of the metadata. Described in CIP-100. New in 13.3-Conway. |
-| `comment` | string | The title of the metadata. Described in CIP-108. New in 13.3-Conway. |
-| `title` | string |  |
-| `abstract` | string | The abstract of the metadata. Described in CIP-108. New in 13.3-Conway. |
-| `motivation` | string | The motivation of the metadata. Described in CIP-108. New in 13.3-Conway. |
-| `rationale` | string | The rationale of the metadata. Described in CIP-108. New in 13.3-Conway. |
+| `comment` | string |  |
 | `json` | jsonb | The payload as JSON. |
 | `bytes` | bytea | The raw bytes of the payload. |
 | `warning` | string | A warning that occured while validating the metadata. |
 | `is_valid` | boolean | False if the data is found invalid. db-sync leaves this field null since it normally populates off_chain_vote_fetch_error for invalid data. It can be used manually to mark some metadata invalid by clients. |
+
+### `off_chain_vote_gov_action_data`
+
+The table with offchain metadata for Governance Actions. Implementes CIP-108. New in 13.3-Conway.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `off_chain_vote_data_id` | integer (64) | The vote metadata table index this offchain data belongs to. |
+| `title` | string | The title |
+| `abstract` | string | The abstract |
+| `motivation` | string | The motivation |
+| `rationale` | string | The rationale |
+
+### `off_chain_vote_drep_data`
+
+The table with offchain metadata for Drep Registrations. Implementes CIP-119. New in 13.3-Conway.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `off_chain_vote_data_id` | integer (64) | The vote metadata table index this offchain data belongs to. |
+| `payment_address` | string | The payment address |
+| `given_name` | string | The name. This is the only mandatory field |
+| `objectives` | string | The objectives |
+| `motivations` | string | The motivations |
+| `qualifications` | string | The qualifications |
+| `image_url` | string |  |
+| `image_hash` | string |  |
 
 ### `off_chain_vote_author`
 
@@ -1105,5 +1143,131 @@ A table containing pools that have been delisted.
 |-|-|-|
 | `id` | integer (64) |  |
 | `hash_raw` | hash28type | The pool hash |
+
+### `tx_out`
+
+A table for transaction outputs.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `address` | string | The human readable encoding of the output address. Will be Base58 for Byron era addresses and Bech32 for Shelley era. |
+| `address_has_script` | boolean | Flag which shows if this address is locked by a script. |
+| `data_hash` | hash32type | The hash of the transaction output datum. (NULL for Txs without scripts). |
+| `consumed_by_tx_id` | integer (64) | The Tx table index of the transaction that consumes this transaction output. Not populated by default, can be activated via tx-out configs. |
+| `index` | txindex | The index of this transaction output with the transaction. |
+| `inline_datum_id` | integer (64) | The inline datum of the output, if it has one. New in v13. |
+| `payment_cred` | hash28type | The payment credential part of the Shelley address. (NULL for Byron addresses). For a script-locked address, this is the script hash. |
+| `reference_script_id` | integer (64) | The reference script of the output, if it has one. New in v13. |
+| `stake_address_id` | integer (64) | The StakeAddress table index for the stake address part of the Shelley address. (NULL for Byron addresses). |
+| `tx_id` | integer (64) | The Tx table index of the transaction that contains this transaction output. |
+| `value` | lovelace | The output value (in Lovelace) of the transaction output. |
+
+### `collateral_tx_out`
+
+A table for transaction collateral outputs. New in v13.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `tx_id` | integer (64) | The Tx table index of the transaction that contains this transaction output. |
+| `index` | txindex | The index of this transaction output with the transaction. |
+| `address` | string | The human readable encoding of the output address. Will be Base58 for Byron era addresses and Bech32 for Shelley era. |
+| `address_has_script` | boolean | Flag which shows if this address is locked by a script. |
+| `payment_cred` | hash28type | The payment credential part of the Shelley address. (NULL for Byron addresses). For a script-locked address, this is the script hash. |
+| `stake_address_id` | integer (64) | The StakeAddress table index for the stake address part of the Shelley address. (NULL for Byron addresses). |
+| `value` | lovelace | The output value (in Lovelace) of the transaction output. |
+| `data_hash` | hash32type | The hash of the transaction output datum. (NULL for Txs without scripts). |
+| `multi_assets_descr` | string | This is a description of the multiassets in collateral output. Since the output is not really created, we don't need to add them in separate tables. |
+| `inline_datum_id` | integer (64) | The inline datum of the output, if it has one. New in v13. |
+| `reference_script_id` | integer (64) | The reference script of the output, if it has one. New in v13. |
+
+### `ma_tx_out`
+
+A table containing Multi-Asset transaction outputs.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `ident` | integer (64) | The MultiAsset table index specifying the asset. |
+| `quantity` | word64type | The Multi Asset transaction output amount (denominated in the Multi Asset). |
+| `tx_out_id` | integer (64) | The TxOut table index for the transaction that this Multi Asset transaction output. |
+
+# Variant Schema
+
+When using the `use_address_table` [configuration](https://github.com/IntersectMBO/cardano-db-sync/blob/master/doc/configuration.md#tx-out), the `tx_out` table is split into two tables: `tx_out` and `address`.
+Bellow are the table documentation for this variaton. 
+
+### `tx_out`
+
+A table for transaction outputs.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `address_id` | integer (64) | The Address table index for the output address. |
+| `consumed_by_tx_id` | integer (64) | The Tx table index of the transaction that consumes this transaction output. Not populated by default, can be activated via tx-out configs. |
+| `data_hash` | hash32type | The hash of the transaction output datum. (NULL for Txs without scripts). |
+| `index` | txindex | The index of this transaction output with the transaction. |
+| `inline_datum_id` | integer (64) | The inline datum of the output, if it has one. New in v13. |
+| `reference_script_id` | integer (64) | The reference script of the output, if it has one. New in v13. |
+| `stake_address_id` | integer (64) |  |
+| `tx_id` | integer (64) | The Tx table index of the transaction that contains this transaction output. |
+| `value` | lovelace | The output value (in Lovelace) of the transaction output. |
+
+### `collateral_tx_out`
+
+A table for transaction collateral outputs. New in v13.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `tx_id` | integer (64) | The Address table index for the output address. |
+| `index` | txindex | The index of this transaction output with the transaction. |
+| `address_id` | integer (64) | The human readable encoding of the output address. Will be Base58 for Byron era addresses and Bech32 for Shelley era. |
+| `stake_address_id` | integer (64) | The StakeAddress table index for the stake address part of the Shelley address. (NULL for Byron addresses). |
+| `value` | lovelace | The output value (in Lovelace) of the transaction output. |
+| `data_hash` | hash32type | The hash of the transaction output datum. (NULL for Txs without scripts). |
+| `multi_assets_descr` | string | This is a description of the multiassets in collateral output. Since the output is not really created, we don't need to add them in separate tables. |
+| `inline_datum_id` | integer (64) | The inline datum of the output, if it has one. New in v13. |
+| `reference_script_id` | integer (64) | The reference script of the output, if it has one. New in v13. |
+
+### `address`
+
+A table for addresses that appear in outputs.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `address` | string | The human readable encoding of the output address. Will be Base58 for Byron era addresses and Bech32 for Shelley era. |
+| `raw` | blob | The raw binary address. |
+| `has_script` | boolean | Flag which shows if this address is locked by a script. |
+| `payment_cred` | hash28type | The payment credential part of the Shelley address. (NULL for Byron addresses). For a script-locked address, this is the script hash. |
+| `stake_address_id` | integer (64) | The StakeAddress table index for the stake address part of the Shelley address. (NULL for Byron addresses). |
+
+### `ma_tx_out`
+
+A table containing Multi-Asset transaction outputs.
+
+* Primary Id: `id`
+
+| Column name | Type | Description |
+|-|-|-|
+| `id` | integer (64) |  |
+| `ident` | integer (64) | The MultiAsset table index specifying the asset. |
+| `quantity` | word64type | The Multi Asset transaction output amount (denominated in the Multi Asset). |
+| `tx_out_id` | integer (64) | The TxOut table index for the transaction that this Multi Asset transaction output. |
 
 

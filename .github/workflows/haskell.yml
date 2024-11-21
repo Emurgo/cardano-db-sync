@@ -19,11 +19,17 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        compiler-nix-name: [ghc810, ghc96]
+        # TODO: Add ghc910 when input-output-hk/devx is fixed
+        compiler-nix-name: [ghc810, ghc96, ghc98]
         include:
           # We want a single job, because macOS runners are scarce.
           - os: macos-latest
             compiler-nix-name: ghc96
+
+    env:
+      # Increment this value to "invalidate" the cabal cache. Be sure to do this
+      # after updating dependencies (Hackage or chap)
+      CABAL_CACHE_VERSION: 1
 
     steps:
       - name: Checkout code
@@ -37,19 +43,14 @@ jobs:
           minimal: false
           # enable IOG-full flavour to bring in all the crypto libraries we need.
           iog-full: true
-      - name: "macOS: clean up pre-installed libraries"
-        if: runner.os == 'macOS'
-        # Homebrew's icu4c conflics with Nix's
-        run: |
-          brew uninstall --ignore-dependencies icu4c
       - name: cache cabal
         uses: actions/cache@v3
         with:
           path: |
             ~/.cabal-devx/packages
             ~/.cabal-devx/store
-          key: ${{ runner.os }}-${{ matrix.compiler-nix-name }}-${{ hashFiles('**/*.cabal', '**/cabal.project', '**/cabal.project.freeze') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.compiler-nix-name }}-
+          key: ${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.compiler-nix-name }}-${{ hashFiles('**/*.cabal', '**/cabal.project', '**/cabal.project.freeze') }}
+          restore-keys: ${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.compiler-nix-name }}-
       - name: cabal update
         run: cabal update
       - name: cabal build dependencies

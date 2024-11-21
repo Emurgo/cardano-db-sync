@@ -9,7 +9,7 @@ module Cardano.DbSync.Rollback (
   unsafeRollback,
 ) where
 
-import Cardano.BM.Trace (Trace, logInfo)
+import Cardano.BM.Trace (Trace, logInfo, logWarning)
 import qualified Cardano.Db as DB
 import Cardano.DbSync.Api
 import Cardano.DbSync.Api.Types (SyncEnv (..))
@@ -48,12 +48,7 @@ rollbackFromBlockNo syncEnv blkNo = do
         , textShow blkNo
         ]
     lift $ do
-      (mTxId, deletedBlockCount) <- DB.deleteBlocksBlockId trce blockId
-      whenConsumeOrPruneTxOut syncEnv $
-        DB.setNullTxOut trce mTxId
-      DB.deleteEpochRows epochNo
-      DB.setNullEnacted epochNo
-      DB.setNullRatified epochNo
+      deletedBlockCount <- DB.deleteBlocksBlockId trce txOutTableType blockId epochNo (Just (DB.pcmConsumedTxOut $ getPruneConsume syncEnv))
       when (deletedBlockCount > 0) $ do
         -- We use custom constraints to improve input speeds when syncing.
         -- If they don't already exists we add them here as once a rollback has happened
@@ -66,6 +61,7 @@ rollbackFromBlockNo syncEnv blkNo = do
   where
     trce = getTrace syncEnv
     cache = envCache syncEnv
+    txOutTableType = getTxOutTableType syncEnv
 
 prepareRollback :: SyncEnv -> CardanoPoint -> Tip CardanoBlock -> IO (Either SyncNodeError Bool)
 prepareRollback syncEnv point serverTip =
@@ -112,7 +108,7 @@ prepareRollback syncEnv point serverTip =
       pure False
 
 -- For testing and debugging.
-unsafeRollback :: Trace IO Text -> DB.PGConfig -> SlotNo -> IO (Either SyncNodeError ())
-unsafeRollback trce config slotNo = do
-  logInfo trce $ "Forced rollback to slot " <> textShow (unSlotNo slotNo)
-  Right <$> DB.runDbNoLogging (DB.PGPassCached config) (void $ DB.deleteBlocksSlotNo trce slotNo)
+unsafeRollback :: Trace IO Text -> DB.TxOutTableType -> DB.PGConfig -> SlotNo -> IO (Either SyncNodeError ())
+unsafeRollback trce txOutTableType config slotNo = do
+  logWarning trce $ "Starting a forced rollback to slot: " <> textShow (unSlotNo slotNo)
+  Right <$> DB.runDbNoLogging (DB.PGPassCached config) (void $ DB.deleteBlocksSlotNo trce txOutTableType slotNo Nothing)

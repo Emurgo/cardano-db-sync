@@ -1,7 +1,7 @@
-cabal-version:          3.0
+cabal-version:          3.6
 
 name:                   cardano-db-sync
-version:                13.2.0.1
+version:                13.6.0.1
 synopsis:               The Cardano DB Sync node
 description:            A Cardano node that follows the Cardano chain and inserts data from the
                         chain into a PostgresQL database.
@@ -111,6 +111,7 @@ library
 
                         Cardano.DbSync.Cache
                         Cardano.DbSync.Cache.Epoch
+                        Cardano.DbSync.Cache.FIFO
                         Cardano.DbSync.Cache.LRU
                         Cardano.DbSync.Cache.Types
                         Cardano.DbSync.Default
@@ -118,6 +119,7 @@ library
 
                         Cardano.DbSync.Rollback
 
+                        Cardano.DbSync.Fix.ConsumedBy
                         Cardano.DbSync.Fix.EpochStake
                         Cardano.DbSync.Fix.PlutusDataBytes
                         Cardano.DbSync.Fix.PlutusScripts
@@ -167,10 +169,10 @@ library
                       , cardano-ledger-binary
                       , cardano-ledger-byron
                       , cardano-ledger-core
-                      , cardano-ledger-conway
+                      , cardano-ledger-conway ^>= 1.17.1
                       , cardano-ledger-binary
                       , cardano-ledger-mary
-                      , cardano-ledger-shelley
+                      , cardano-ledger-shelley >= 1.12.3.0
                       , cardano-node
                       , cardano-prelude
                       , cardano-protocol-tpraos
@@ -370,7 +372,7 @@ test-suite test
                       , cardano-ledger-allegra:{cardano-ledger-allegra,testlib}
                       , cardano-ledger-alonzo:{testlib}
                       , cardano-ledger-byron
-                      , cardano-ledger-shelley:{cardano-ledger-shelley,testlib}
+                      , cardano-ledger-shelley:{cardano-ledger-shelley,testlib} >= 1.12.3.0
                       , cardano-db
                       , cardano-db-sync
                       , cardano-ledger-core

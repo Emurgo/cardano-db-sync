@@ -1,3 +1,6 @@
+[![Haskell CI](https://img.shields.io/github/actions/workflow/status/intersectmbo/cardano-db-sync/haskell.yml?branch=master&style=for-the-badge)](https://github.com/intersectmbo/cardano-db-sync/actions/workflows/haskell.yml)
+[![Discord](https://img.shields.io/discord/1136727663583698984?style=for-the-badge&color=blue)](https://discord.gg/GXrTvmzHQN)
+
 # Cardano DB Sync
 
 **Note:** Anyone wishing to build and run anything in this repository should avoid the `master` branch and build/run from the latest release tag.
@@ -66,6 +69,13 @@ faster than traffic to a database on the LAN or remotely to another location.
 When building an application that will be querying the database, remember that for fast queries,
 low latency disk access is far more important than high throughput (assuming the minimal IOPS
 above is met).
+
+## How to Contact the Cardano DB Sync Team
+
+You can discuss development or find help at the following places:
+
+ * Intersect Discord [#db-sync](https://discord.com/channels/1136727663583698984/1239888910537064468) channel, if new to server invite [here](https://discord.gg/GXrTvmzHQN)
+ * [GitHub Issues](https://github.com/IntersectMBO/cardano-db-sync/issues)
 
 ## Installation
 

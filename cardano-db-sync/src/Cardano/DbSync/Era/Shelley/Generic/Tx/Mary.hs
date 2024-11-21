@@ -23,7 +23,9 @@ fromMaryTx :: (Word64, Core.Tx StandardMary) -> Tx
 fromMaryTx (blkIndex, tx) =
   Tx
     { txHash = txHashId tx
+    , txLedgerTxId = mkTxId tx
     , txBlockIndex = blkIndex
+    , txCBOR = getTxCBOR tx
     , txSize = getTxSize tx
     , txValidContract = True
     , txInputs = mkTxIn txBody
@@ -48,6 +50,7 @@ fromMaryTx (blkIndex, tx) =
     , txExtraKeyWitnesses = []
     , txVotingProcedure = []
     , txProposalProcedure = []
+    , txTreasuryDonation = mempty -- Mary does not support treasury donations
     }
   where
     txBody :: Core.TxBody StandardMary

@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
@@ -52,8 +53,10 @@ syncPreConfig =
     <*> (NodeConfigFile <$> filePath)
     <*> Gen.bool
     <*> Gen.bool
+    <*> Gen.bool
     <*> Gen.int (Range.linear 0 10000)
     <*> syncInsertConfig
+    <*> Gen.list (Range.linear 0 10) (Gen.text (Range.linear 0 100) Gen.unicode)
 
 syncNodeParams :: MonadGen m => m SyncNodeParams
 syncNodeParams =
@@ -101,21 +104,22 @@ syncNodeConfig loggingCfg =
     <*> triggerHardFork
     <*> triggerHardFork
     <*> syncInsertOptions
+    <*> pure []
 
 syncInsertConfig :: Gen SyncInsertConfig
 syncInsertConfig =
   Gen.choice
-    [ pure FullInsertOptions
-    , pure OnlyUTxOInsertOptions
-    , pure OnlyGovInsertOptions
-    , pure DisableAllInsertOptions
-    , SyncInsertConfig <$> syncInsertOptions
+    [ pure $ SyncInsertConfig (Just FullInsertPreset) fullInsertOptions
+    , pure $ SyncInsertConfig (Just OnlyUTxOInsertPreset) onlyUTxOInsertOptions
+    , pure $ SyncInsertConfig (Just OnlyGovInsertPreset) onlyGovInsertOptions
+    , pure $ SyncInsertConfig (Just DisableAllInsertPreset) disableAllInsertOptions
+    , SyncInsertConfig Nothing <$> syncInsertOptions
     ]
 
 syncInsertOptions :: Gen SyncInsertOptions
 syncInsertOptions =
-  SyncInsertOptions
-    <$> txOutConfig
+  (SyncInsertOptions . TxCBORConfig <$> Gen.bool)
+    <*> txOutConfig
     <*> Gen.element [LedgerEnable, LedgerDisable, LedgerIgnore]
     <*> shelleyConfig
     <*> pure (RewardsConfig True)
@@ -124,16 +128,18 @@ syncInsertOptions =
     <*> plutusConfig
     <*> (GovernanceConfig <$> Gen.bool)
     <*> (OffchainPoolDataConfig <$> Gen.bool)
+    <*> (PoolStatsConfig <$> Gen.bool)
     <*> Gen.element [JsonTypeText, JsonTypeJsonb, JsonTypeDisable]
+    <*> (RemoveJsonbFromSchemaConfig <$> Gen.bool)
 
 txOutConfig :: Gen TxOutConfig
 txOutConfig =
   Gen.choice
-    [ pure TxOutEnable
+    [ TxOutEnable . UseTxOutAddress <$> Gen.bool
     , pure TxOutDisable
-    , TxOutConsumed <$> (ForceTxIn <$> Gen.bool)
-    , TxOutPrune <$> (ForceTxIn <$> Gen.bool)
-    , TxOutBootstrap <$> (ForceTxIn <$> Gen.bool)
+    , (TxOutConsumed . ForceTxIn <$> Gen.bool) <*> (UseTxOutAddress <$> Gen.bool)
+    , (TxOutConsumedPrune . ForceTxIn <$> Gen.bool) <*> (UseTxOutAddress <$> Gen.bool)
+    , (TxOutConsumedBootstrap . ForceTxIn <$> Gen.bool) <*> (UseTxOutAddress <$> Gen.bool)
     ]
 
 shelleyConfig :: Gen ShelleyInsertConfig

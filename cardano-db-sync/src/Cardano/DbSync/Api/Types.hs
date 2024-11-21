@@ -10,11 +10,11 @@ module Cardano.DbSync.Api.Types (
   RunMigration,
   FixesRan (..),
   ConsistentLevel (..),
-  EpochState (..),
+  CurrentEpochNo (..),
 ) where
 
 import qualified Cardano.Db as DB
-import Cardano.DbSync.Cache.Types (Cache)
+import Cardano.DbSync.Cache.Types (CacheStatus)
 import Cardano.DbSync.Config.Types (SyncNodeConfig)
 import Cardano.DbSync.Ledger.Types (HasLedgerEnv)
 import Cardano.DbSync.LocalStateQuery (NoLedgerEnv)
@@ -39,11 +39,11 @@ import Ouroboros.Network.Magic (NetworkMagic (..))
 
 data SyncEnv = SyncEnv
   { envBackend :: !SqlBackend
-  , envCache :: !Cache
+  , envCache :: !CacheStatus
   , envConnectionString :: !ConnectionString
   , envConsistentLevel :: !(StrictTVar IO ConsistentLevel)
   , envDbConstraints :: !(StrictTVar IO DB.ManualDbConstraints)
-  , envEpochState :: !(StrictTVar IO EpochState)
+  , envCurrentEpochNo :: !(StrictTVar IO CurrentEpochNo)
   , envEpochSyncTime :: !(StrictTVar IO UTCTime)
   , envIndexes :: !(StrictTVar IO Bool)
   , envIsFixed :: !(StrictTVar IO FixesRan)
@@ -74,7 +74,8 @@ data SyncOptions = SyncOptions
   deriving (Show)
 
 data InsertOptions = InsertOptions
-  { ioInOut :: !Bool
+  { ioTxCBOR :: !Bool
+  , ioInOut :: !Bool
   , ioUseLedger :: !Bool
   , ioShelley :: !Bool
   , ioRewards :: !Bool
@@ -83,7 +84,10 @@ data InsertOptions = InsertOptions
   , ioKeepMetadataNames :: Strict.Maybe [Word64]
   , ioPlutusExtra :: !Bool
   , ioOffChainPoolData :: !Bool
+  , ioPoolStats :: !Bool
   , ioGov :: !Bool
+  , ioRemoveJsonbFromSchema :: !Bool
+  , ioTxOutTableType :: !DB.TxOutTableType
   }
   deriving (Show)
 
@@ -99,7 +103,6 @@ data FixesRan = NoneFixRan | DataFixRan | AllFixRan
 data ConsistentLevel = Consistent | DBAheadOfLedger | Unchecked
   deriving (Show, Eq)
 
-data EpochState = EpochState
-  { esInitialized :: !Bool
-  , esEpochNo :: !(Strict.Maybe EpochNo)
+newtype CurrentEpochNo = CurrentEpochNo
+  { cenEpochNo :: Strict.Maybe EpochNo
   }

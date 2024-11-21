@@ -23,14 +23,15 @@ module Cardano.Db.Types (
   CertNo (..),
   PoolCert (..),
   ExtraMigration (..),
+  MigrationValues (..),
   VoteUrl (..),
   VoteMetaHash (..),
   Vote (..),
   VoterRole (..),
   GovActionType (..),
   BootstrapState (..),
+  processMigrationValues,
   isStakeDistrComplete,
-  wasPruneTxOutPreviouslySet,
   bootstrapState,
   extraDescription,
   deltaCoinToDbInt65,
@@ -135,7 +136,7 @@ newtype DbLovelace = DbLovelace {unDbLovelace :: Word64}
 
 -- Newtype wrapper around Word64 so we can hand define a PersistentField instance.
 newtype DbWord64 = DbWord64 {unDbWord64 :: Word64}
-  deriving (Eq, Generic)
+  deriving (Eq, Generic, Num)
   deriving (Read, Show) via (Quiet DbWord64)
 
 -- The following must be in alphabetic order.
@@ -145,6 +146,7 @@ data RewardSource
   | RwdReserves
   | RwdTreasury
   | RwdDepositRefund
+  | RwdProposalRefund
   deriving (Bounded, Enum, Eq, Ord, Show)
 
 data SyncState
@@ -195,13 +197,31 @@ data ExtraMigration
   | PruneTxOutFlagPreviouslySet
   | BootstrapStarted
   | BootstrapFinished
+  | ConsumeTxOutPreviouslySet
+  | TxOutAddressPreviouslySet
   deriving (Eq, Show, Read)
+
+data MigrationValues = MigrationValues
+  { isStakeDistrEnded :: !Bool
+  , isPruneTxOutPreviouslySet :: !Bool
+  , isConsumeTxOutPreviouslySet :: !Bool
+  , isTxOutAddressPreviouslySet :: !Bool
+  , pruneConsumeMigration :: !PruneConsumeMigration
+  }
+  deriving (Eq, Show)
+
+processMigrationValues :: [ExtraMigration] -> PruneConsumeMigration -> MigrationValues
+processMigrationValues migrations pcm =
+  MigrationValues
+    { isStakeDistrEnded = StakeDistrEnded `elem` migrations
+    , isPruneTxOutPreviouslySet = PruneTxOutFlagPreviouslySet `elem` migrations
+    , isConsumeTxOutPreviouslySet = ConsumeTxOutPreviouslySet `elem` migrations
+    , isTxOutAddressPreviouslySet = TxOutAddressPreviouslySet `elem` migrations
+    , pruneConsumeMigration = pcm
+    }
 
 isStakeDistrComplete :: [ExtraMigration] -> Bool
 isStakeDistrComplete = elem StakeDistrEnded
-
-wasPruneTxOutPreviouslySet :: [ExtraMigration] -> Bool
-wasPruneTxOutPreviouslySet = elem PruneTxOutFlagPreviouslySet
 
 data BootstrapState
   = BootstrapNotStarted
@@ -219,7 +239,7 @@ data PruneConsumeMigration = PruneConsumeMigration
   { pcmPruneTxOut :: Bool
   , -- we make the assumption that if the user is using prune flag
     -- they will also want consume automatically set for them.
-    pcmConsumeOrPruneTxOut :: Bool
+    pcmConsumedTxOut :: Bool
   , pcmSkipTxIn :: Bool
   }
   deriving (Eq, Show)
@@ -235,6 +255,10 @@ extraDescription = \case
     "The bootstrap syncing is in progress"
   BootstrapFinished ->
     "The bootstrap is finalised"
+  ConsumeTxOutPreviouslySet ->
+    "The --consume-tx-out flag has previously been enabled"
+  TxOutAddressPreviouslySet ->
+    "The addition of a Address table for TxOuts was previously set"
 instance Ord PoolCert where
   compare a b = compare (pcCertNo a) (pcCertNo b)
 
@@ -269,7 +293,11 @@ data GovActionType
 
 data AnchorType
   = GovActionAnchor
+  | DrepAnchor
   | OtherAnchor
+  | VoteAnchor
+  | CommitteeDeRegAnchor
+  | ConstitutionAnchor
   deriving (Eq, Ord, Generic)
   deriving (Show) via (Quiet AnchorType)
 
@@ -317,6 +345,7 @@ readRewardSource str =
     "reserves" -> RwdReserves
     "treasury" -> RwdTreasury
     "refund" -> RwdDepositRefund
+    "proposal_refund" -> RwdProposalRefund
     -- This should never happen. On the Postgres side we defined an ENUM with
     -- only the two values as above.
     _other -> error $ "readRewardSource: Unknown RewardSource " ++ Text.unpack str
@@ -365,6 +394,7 @@ showRewardSource rs =
     RwdReserves -> "reserves"
     RwdTreasury -> "treasury"
     RwdDepositRefund -> "refund"
+    RwdProposalRefund -> "proposal_refund"
 
 renderScriptType :: ScriptType -> Text
 renderScriptType st =
@@ -441,13 +471,21 @@ renderAnchorType :: AnchorType -> Text
 renderAnchorType gav =
   case gav of
     GovActionAnchor -> "gov_action"
+    DrepAnchor -> "drep"
     OtherAnchor -> "other"
+    VoteAnchor -> "vote"
+    CommitteeDeRegAnchor -> "committee_dereg"
+    ConstitutionAnchor -> "constitution"
 
 readAnchorType :: String -> AnchorType
 readAnchorType str =
   case str of
     "gov_action" -> GovActionAnchor
+    "drep" -> DrepAnchor
     "other" -> OtherAnchor
+    "vote" -> VoteAnchor
+    "committee_dereg" -> CommitteeDeRegAnchor
+    "constitution" -> ConstitutionAnchor
     _other -> error $ "readAnchorType: Unknown AnchorType " ++ str
 
 word64ToAda :: Word64 -> Ada

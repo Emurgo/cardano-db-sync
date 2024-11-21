@@ -13,7 +13,7 @@ import Cardano.DbSync.Cache (
   queryPoolKeyWithCache,
   queryStakeAddrWithCache,
  )
-import Cardano.DbSync.Cache.Types (Cache, CacheNew (..))
+import Cardano.DbSync.Cache.Types (CacheAction (..), CacheStatus)
 import qualified Cardano.DbSync.Era.Shelley.Generic.Rewards as Generic
 import Cardano.DbSync.Types (StakeCred)
 import Cardano.Ledger.BaseTypes (Network)
@@ -50,36 +50,37 @@ adjustEpochRewards ::
   (MonadBaseControl IO m, MonadIO m) =>
   Trace IO Text ->
   Network ->
-  Cache ->
+  CacheStatus ->
   EpochNo ->
   Generic.Rewards ->
   Set StakeCred ->
   ReaderT SqlBackend m ()
-adjustEpochRewards tracer nw cache epochNo rwds creds = do
+adjustEpochRewards trce nw cache epochNo rwds creds = do
   let eraIgnored = Map.toList $ Generic.unRewards rwds
-  liftIO . logInfo tracer $
+  liftIO . logInfo trce $
     mconcat
       [ "Removing "
-      , if null eraIgnored then "" else Db.textShow (length eraIgnored) <> " rewards and "
+      , if null eraIgnored then "" else textShow (length eraIgnored) <> " rewards and "
       , show (length creds)
       , " orphaned rewards"
       ]
   forM_ eraIgnored $ \(cred, rewards) ->
     forM_ (Set.toList rewards) $ \rwd ->
-      deleteReward nw cache epochNo (cred, rwd)
-  crds <- rights <$> forM (Set.toList creds) (queryStakeAddrWithCache cache DontCacheNew nw)
+      deleteReward trce nw cache epochNo (cred, rwd)
+  crds <- rights <$> forM (Set.toList creds) (queryStakeAddrWithCache trce cache DoNotUpdateCache nw)
   deleteOrphanedRewards epochNo crds
 
 deleteReward ::
   (MonadBaseControl IO m, MonadIO m) =>
+  Trace IO Text ->
   Network ->
-  Cache ->
+  CacheStatus ->
   EpochNo ->
   (StakeCred, Generic.Reward) ->
   ReaderT SqlBackend m ()
-deleteReward nw cache epochNo (cred, rwd) = do
-  mAddrId <- queryStakeAddrWithCache cache DontCacheNew nw cred
-  eiPoolId <- queryPoolKeyWithCache cache DontCacheNew (Generic.rewardPool rwd)
+deleteReward trce nw cache epochNo (cred, rwd) = do
+  mAddrId <- queryStakeAddrWithCache trce cache DoNotUpdateCache nw cred
+  eiPoolId <- queryPoolKeyWithCache cache DoNotUpdateCache (Generic.rewardPool rwd)
   case (mAddrId, eiPoolId) of
     (Right addrId, Right poolId) -> do
       delete $ do

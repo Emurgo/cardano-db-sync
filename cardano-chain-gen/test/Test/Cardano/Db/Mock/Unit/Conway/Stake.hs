@@ -64,7 +64,7 @@ registrationTx =
     assertBlockNoBackoff dbSync 4
     assertCertCounts dbSync (2, 2, 0, 0)
   where
-    testLabel = "registrationTx"
+    testLabel = "conwayRegistrationTx"
 
 registrationsSameBlock :: IOManager -> [(Text, Text)] -> Assertion
 registrationsSameBlock =
@@ -130,7 +130,7 @@ stakeAddressPtr =
     let ptr = Ptr (blockSlot blk) (TxIx 0) (CertIx 0)
     void $
       Api.withConwayFindLeaderAndSubmitTx interpreter mockServer $
-        Conway.mkPaymentTx (UTxOIndex 0) (UTxOAddressNewWithPtr 0 ptr) 20_000 20_000
+        Conway.mkPaymentTx (UTxOIndex 0) (UTxOAddressNewWithPtr 0 ptr) 20_000 20_000 0
 
     -- Wait for it to sync and verify counts
     assertBlockNoBackoff dbSync 2
@@ -156,6 +156,7 @@ stakeAddressPtrDereg =
             (UTxOAddressNewWithPtr 0 ptr0)
             20_000
             20_000
+            0
             state'
         , Conway.mkSimpleDCertTx
             [ (StakeIndexNew 0, Conway.mkUnRegTxCert SNothing)
@@ -173,12 +174,14 @@ stakeAddressPtrDereg =
             (UTxOAddressNewWithPtr 0 ptr1)
             20_000
             20_000
+            0
             state'
         , Conway.mkPaymentTx
             (UTxOIndex 2)
             (UTxOAddressNewWithPtr 0 ptr0)
             20_000
             20_000
+            0
             state'
         ]
 
@@ -206,6 +209,7 @@ stakeAddressPtrUseBefore =
           (UTxOAddressNewWithStake 0 $ StakeIndexNew 1)
           10_000
           500
+          0
     -- Register it
     blk <-
       Api.withConwayFindLeaderAndSubmitTx interpreter mockServer $
@@ -214,7 +218,7 @@ stakeAddressPtrUseBefore =
     let ptr = Ptr (blockSlot blk) (TxIx 0) (CertIx 0)
     void $
       Api.withConwayFindLeaderAndSubmitTx interpreter mockServer $
-        Conway.mkPaymentTx (UTxOIndex 0) (UTxOAddressNewWithPtr 0 ptr) 20_000 20_000
+        Conway.mkPaymentTx (UTxOIndex 0) (UTxOAddressNewWithPtr 0 ptr) 20_000 20_000 0
 
     -- Wait for it to sync and verify count
     assertBlockNoBackoff dbSync 3
@@ -412,7 +416,7 @@ registerStakeCreds = do
 
 registerStakeCredsNoShelley :: IOManager -> [(Text, Text)] -> Assertion
 registerStakeCredsNoShelley = do
-  withCustomConfig args Nothing cfgDir testLabel $ \interpreter mockServer dbSync -> do
+  withCustomConfig args (Just configShelleyDisable) cfgDir testLabel $ \interpreter mockServer dbSync -> do
     startDBSync dbSync
 
     -- These should not be saved when shelley is disabled
@@ -427,8 +431,7 @@ registerStakeCredsNoShelley = do
   where
     args =
       initCommandLineArgs
-        { claConfigFilename = "test-db-sync-config-no-shelley.json"
-        , claFullMode = False
+        { claFullMode = False
         }
     testLabel = "conwayConfigShelleyDisabled"
     cfgDir = conwayConfigDir

@@ -17,6 +17,7 @@ module Cardano.DbSync.Era.Shelley.Generic.Tx.Types (
   TxScript (..),
   PlutusData (..),
   TxOutDatum (..),
+  PoolStats (..),
   DBScriptPurpose (..),
   DBPlutusScript (..),
   toTxCert,
@@ -24,11 +25,13 @@ module Cardano.DbSync.Era.Shelley.Generic.Tx.Types (
   getTxOutDatumHash,
   getMaybeDatumHash,
   sumTxOutCoin,
+  toTxHash,
 ) where
 
 import qualified Cardano.Db as DB
 import Cardano.DbSync.Era.Shelley.Generic.Metadata (TxMetadataValue (..))
 import Cardano.DbSync.Era.Shelley.Generic.ParamProposal
+import Cardano.DbSync.Era.Shelley.Generic.Util
 import Cardano.DbSync.Types
 import qualified Cardano.Ledger.Address as Ledger
 import Cardano.Ledger.Alonzo.Scripts
@@ -42,13 +45,16 @@ import Cardano.Ledger.Core (TxBody)
 import Cardano.Ledger.Mary.Value (AssetName, MultiAsset, PolicyID)
 import qualified Cardano.Ledger.Shelley.TxBody as Shelley
 import Cardano.Ledger.Shelley.TxCert
+import qualified Cardano.Ledger.TxIn as Ledger
 import Cardano.Prelude
 import Cardano.Slotting.Slot (SlotNo (..))
 import Ouroboros.Consensus.Cardano.Block (StandardAlonzo, StandardBabbage, StandardConway, StandardCrypto, StandardShelley)
 
 data Tx = Tx
   { txHash :: !ByteString
+  , txLedgerTxId :: !(Ledger.TxId StandardCrypto)
   , txBlockIndex :: !Word64
+  , txCBOR :: ByteString
   , txSize :: !Word64
   , txValidContract :: !Bool
   , txInputs :: ![TxIn]
@@ -72,7 +78,8 @@ data Tx = Tx
   , txScripts :: [TxScript]
   , txExtraKeyWitnesses :: ![ByteString]
   , txVotingProcedure :: ![(Voter StandardCrypto, [(GovActionId StandardCrypto, VotingProcedure StandardConway)])]
-  , txProposalProcedure :: ![ProposalProcedure StandardConway]
+  , txProposalProcedure :: ![(GovActionId StandardCrypto, ProposalProcedure StandardConway)]
+  , txTreasuryDonation :: !Coin
   }
 
 type ShelleyCert = ShelleyTxCert StandardShelley
@@ -87,13 +94,13 @@ data TxCertificate = TxCertificate
 
 data TxWithdrawal = TxWithdrawal
   { txwRedeemerIndex :: !(Maybe Word64)
-  , txwRewardAccount :: !(Shelley.RewardAcnt StandardCrypto)
+  , txwRewardAccount :: !(Shelley.RewardAccount StandardCrypto)
   , txwAmount :: !Coin
   }
 
 data TxIn = TxIn
-  { txInHash :: !ByteString
-  , txInIndex :: !Word64
+  { txInIndex :: !Word64
+  , txInTxId :: !(Ledger.TxId StandardCrypto)
   , txInRedeemerIndex :: !(Maybe Word64) -- This only has a meaning for Alonzo.
   }
   deriving (Show)
@@ -137,6 +144,13 @@ data PlutusData = PlutusData
 
 data TxOutDatum = InlineDatum PlutusData | DatumHash DataHash | NoDatum
 
+data PoolStats = PoolStats
+  { nBlocks :: Natural
+  , nDelegators :: Word64
+  , stake :: Coin
+  , votingPower :: Maybe Coin
+  }
+
 toTxCert :: Word16 -> Cert -> TxCertificate
 toTxCert idx dcert =
   TxCertificate
@@ -161,44 +175,47 @@ getMaybeDatumHash (Just hsh) = DatumHash hsh
 sumTxOutCoin :: [TxOut] -> Coin
 sumTxOutCoin = Coin . sum . map (unCoin . txOutAdaValue)
 
+toTxHash :: TxIn -> ByteString
+toTxHash = unTxHash . txInTxId
+
 class AlonzoEraTxBody era => DBScriptPurpose era where
-  getPurpose :: PlutusPurpose AsIndex era -> (DB.ScriptPurpose, Word32)
-  toAlonzoPurpose :: TxBody era -> PlutusPurpose AsItem era -> Maybe (Either (AlonzoPlutusPurpose AsItem era, Maybe (PlutusPurpose AsIndex era)) (ConwayPlutusPurpose AsItem era))
+  getPurpose :: PlutusPurpose AsIx era -> (DB.ScriptPurpose, Word32)
+  toAlonzoPurpose :: TxBody era -> PlutusPurpose AsItem era -> Maybe (Either (AlonzoPlutusPurpose AsItem era, Maybe (PlutusPurpose AsIx era)) (ConwayPlutusPurpose AsItem era))
 
 instance DBScriptPurpose StandardAlonzo where
   getPurpose = \case
-    AlonzoSpending idx -> (DB.Spend, unAsIndex idx)
-    AlonzoMinting idx -> (DB.Mint, unAsIndex idx)
-    AlonzoCertifying idx -> (DB.Cert, unAsIndex idx)
-    AlonzoRewarding idx -> (DB.Rewrd, unAsIndex idx)
+    AlonzoSpending idx -> (DB.Spend, unAsIx idx)
+    AlonzoMinting idx -> (DB.Mint, unAsIx idx)
+    AlonzoCertifying idx -> (DB.Cert, unAsIx idx)
+    AlonzoRewarding idx -> (DB.Rewrd, unAsIx idx)
 
   toAlonzoPurpose txBody pp = case pp of
     AlonzoSpending a -> Just $ Left (AlonzoSpending a, Nothing)
     AlonzoMinting a -> Just $ Left (AlonzoMinting a, Nothing)
     AlonzoRewarding a -> Just $ Left (AlonzoRewarding a, Nothing)
-    AlonzoCertifying a -> Just $ Left (AlonzoCertifying a, strictMaybeToMaybe (redeemerPointer txBody pp))
+    AlonzoCertifying a -> Just $ Left (AlonzoCertifying a, strictMaybeToMaybe (alonzoRedeemerPointer txBody pp))
 
 instance DBScriptPurpose StandardBabbage where
   getPurpose = \case
-    AlonzoSpending idx -> (DB.Spend, unAsIndex idx)
-    AlonzoMinting idx -> (DB.Mint, unAsIndex idx)
-    AlonzoCertifying idx -> (DB.Cert, unAsIndex idx)
-    AlonzoRewarding idx -> (DB.Rewrd, unAsIndex idx)
+    AlonzoSpending idx -> (DB.Spend, unAsIx idx)
+    AlonzoMinting idx -> (DB.Mint, unAsIx idx)
+    AlonzoCertifying idx -> (DB.Cert, unAsIx idx)
+    AlonzoRewarding idx -> (DB.Rewrd, unAsIx idx)
 
   toAlonzoPurpose txBody pp = case pp of
     AlonzoSpending a -> Just $ Left (AlonzoSpending a, Nothing)
     AlonzoMinting a -> Just $ Left (AlonzoMinting a, Nothing)
     AlonzoRewarding a -> Just $ Left (AlonzoRewarding a, Nothing)
-    AlonzoCertifying a -> Just $ Left (AlonzoCertifying a, strictMaybeToMaybe (redeemerPointer txBody pp))
+    AlonzoCertifying a -> Just $ Left (AlonzoCertifying a, strictMaybeToMaybe (alonzoRedeemerPointer txBody pp))
 
 instance DBScriptPurpose StandardConway where
   getPurpose = \case
-    ConwaySpending idx -> (DB.Spend, unAsIndex idx)
-    ConwayMinting idx -> (DB.Mint, unAsIndex idx)
-    ConwayCertifying idx -> (DB.Cert, unAsIndex idx)
-    ConwayRewarding idx -> (DB.Rewrd, unAsIndex idx)
-    ConwayVoting idx -> (DB.Vote, unAsIndex idx)
-    ConwayProposing idx -> (DB.Propose, unAsIndex idx)
+    ConwaySpending idx -> (DB.Spend, unAsIx idx)
+    ConwayMinting idx -> (DB.Mint, unAsIx idx)
+    ConwayCertifying idx -> (DB.Cert, unAsIx idx)
+    ConwayRewarding idx -> (DB.Rewrd, unAsIx idx)
+    ConwayVoting idx -> (DB.Vote, unAsIx idx)
+    ConwayProposing idx -> (DB.Propose, unAsIx idx)
 
   toAlonzoPurpose _ = \case
     ConwayVoting _ -> Nothing

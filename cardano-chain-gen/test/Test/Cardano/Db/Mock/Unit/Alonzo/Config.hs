@@ -21,7 +21,8 @@ insertConfig = do
   cfg <- mkSyncNodeConfig configDir initCommandLineArgs
   let expected =
         SyncInsertOptions
-          { sioTxOut = TxOutDisable
+          { sioTxCBOR = TxCBORConfig False
+          , sioTxOut = TxOutDisable
           , sioLedger = LedgerDisable
           , sioShelley = ShelleyDisable
           , sioRewards = RewardsConfig True
@@ -30,7 +31,9 @@ insertConfig = do
           , sioPlutus = PlutusDisable
           , sioGovernance = GovernanceConfig False
           , sioOffchainPoolData = OffchainPoolDataConfig False
+          , sioPoolStats = PoolStatsConfig False
           , sioJsonType = JsonTypeDisable
+          , sioRemoveJsonbFromSchema = RemoveJsonbFromSchemaConfig False
           }
 
   dncInsertOptions cfg @?= expected

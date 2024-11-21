@@ -5,6 +5,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 
 module Cardano.DbSync.Ledger.Types where
@@ -27,6 +28,7 @@ import Cardano.Ledger.Coin (Coin)
 import Cardano.Ledger.Conway.Governance
 import Cardano.Ledger.Credential (Credential (..))
 import Cardano.Ledger.Keys (KeyRole (..))
+import Cardano.Ledger.Shelley.LedgerState (NewEpochState ())
 import Cardano.Prelude hiding (atomically)
 import Cardano.Slotting.Slot (
   EpochNo (..),
@@ -38,14 +40,17 @@ import Control.Concurrent.Class.MonadSTM.Strict (
  )
 import Control.Concurrent.STM.TBQueue (TBQueue)
 import qualified Data.Map.Strict as Map
+import Data.SOP.Strict
 import qualified Data.Set as Set
 import qualified Data.Strict.Maybe as Strict
-import Lens.Micro
+import Lens.Micro (Traversal')
 import Ouroboros.Consensus.BlockchainTime.WallClock.Types (SystemStart (..))
-import Ouroboros.Consensus.Cardano.Block (StandardConway, StandardCrypto)
+import Ouroboros.Consensus.Cardano.Block hiding (CardanoBlock, CardanoLedgerState)
+import Ouroboros.Consensus.HardFork.Combinator.Basics (LedgerState (..))
 import Ouroboros.Consensus.Ledger.Abstract (getTipSlot)
 import Ouroboros.Consensus.Ledger.Extended (ExtLedgerState (..))
 import qualified Ouroboros.Consensus.Node.ProtocolInfo as Consensus
+import Ouroboros.Consensus.Shelley.Ledger (LedgerState (..), ShelleyBlock)
 import Ouroboros.Network.AnchoredSeq (Anchorable (..), AnchoredSeq (..))
 import Prelude (fail, id)
 
@@ -133,10 +138,11 @@ data ApplyResult = ApplyResult
   , apPoolsRegistered :: !(Set.Set PoolKeyHash) -- registered before the block application
   , apNewEpoch :: !(Strict.Maybe Generic.NewEpoch) -- Only Just for a single block at the epoch boundary
   , apOldLedger :: !(Strict.Maybe CardanoLedgerState)
+  , apDeposits :: !(Strict.Maybe Generic.Deposits) -- The current required deposits
   , apSlotDetails :: !SlotDetails
   , apStakeSlice :: !Generic.StakeSliceRes
   , apEvents :: ![LedgerEvent]
-  , apEnactState :: !(Maybe (EnactState StandardConway))
+  , apGovActionState :: !(Maybe (ConwayGovState StandardConway))
   , apDepositsMap :: !DepositsMap
   }
 
@@ -148,10 +154,11 @@ defaultApplyResult slotDetails =
     , apPoolsRegistered = Set.empty
     , apNewEpoch = Strict.Nothing
     , apOldLedger = Strict.Nothing
+    , apDeposits = Strict.Nothing
     , apSlotDetails = slotDetails
     , apStakeSlice = Generic.NoSlices
     , apEvents = []
-    , apEnactState = Nothing
+    , apGovActionState = Nothing
     , apDepositsMap = emptyDepositsMap
     }
 
@@ -159,11 +166,6 @@ getGovExpiresAt :: ApplyResult -> EpochNo -> Maybe EpochNo
 getGovExpiresAt applyResult e = case apGovExpiresAfter applyResult of
   Strict.Just ei -> Just $ Ledger.addEpochInterval e ei
   Strict.Nothing -> Nothing
-
-getCommittee :: ApplyResult -> Maybe (Ledger.StrictMaybe (Committee StandardConway))
-getCommittee ar = case apEnactState ar of
-  Nothing -> Nothing
-  Just es -> Just $ es ^. ensCommitteeL
 
 -- TODO reuse this function rom ledger after it's exported.
 updatedCommittee ::
@@ -193,3 +195,97 @@ instance Anchorable (WithOrigin SlotNo) CardanoLedgerState CardanoLedgerState wh
   getAnchorMeasure _ = getTipSlot . clsState
 
 data SnapshotPoint = OnDisk LedgerStateFile | InMemory CardanoPoint
+
+-- | Per-era pure getters and setters on @NewEpochState@. Note this is a bit of an abuse
+-- of the cardano-ledger/ouroboros-consensus public APIs, because ledger state is not
+-- designed to be updated this way. We are only replaying the chain, so this should be
+-- safe.
+class HasNewEpochState era where
+  getNewEpochState :: ExtLedgerState CardanoBlock -> Maybe (NewEpochState era)
+
+  applyNewEpochState ::
+    NewEpochState era ->
+    ExtLedgerState CardanoBlock ->
+    ExtLedgerState CardanoBlock
+
+instance HasNewEpochState StandardShelley where
+  getNewEpochState st = case ledgerState st of
+    LedgerStateShelley shelley -> Just (shelleyLedgerState shelley)
+    _ -> Nothing
+
+  applyNewEpochState st =
+    hApplyExtLedgerState $
+      fn (applyNewEpochState' st) :* fn id :* fn id :* fn id :* fn id :* fn id :* Nil
+
+instance HasNewEpochState StandardAllegra where
+  getNewEpochState st = case ledgerState st of
+    LedgerStateAllegra allegra -> Just (shelleyLedgerState allegra)
+    _ -> Nothing
+
+  applyNewEpochState st =
+    hApplyExtLedgerState $
+      fn id :* fn (applyNewEpochState' st) :* fn id :* fn id :* fn id :* fn id :* Nil
+
+instance HasNewEpochState StandardMary where
+  getNewEpochState st = case ledgerState st of
+    LedgerStateMary mary -> Just (shelleyLedgerState mary)
+    _ -> Nothing
+
+  applyNewEpochState st =
+    hApplyExtLedgerState $
+      fn id :* fn id :* fn (applyNewEpochState' st) :* fn id :* fn id :* fn id :* Nil
+
+instance HasNewEpochState StandardAlonzo where
+  getNewEpochState st = case ledgerState st of
+    LedgerStateAlonzo alonzo -> Just (shelleyLedgerState alonzo)
+    _ -> Nothing
+
+  applyNewEpochState st =
+    hApplyExtLedgerState $
+      fn id :* fn id :* fn id :* fn (applyNewEpochState' st) :* fn id :* fn id :* Nil
+
+instance HasNewEpochState StandardBabbage where
+  getNewEpochState st = case ledgerState st of
+    LedgerStateBabbage babbage -> Just (shelleyLedgerState babbage)
+    _ -> Nothing
+
+  applyNewEpochState st =
+    hApplyExtLedgerState $
+      fn id :* fn id :* fn id :* fn id :* fn (applyNewEpochState' st) :* fn id :* Nil
+
+instance HasNewEpochState StandardConway where
+  getNewEpochState st = case ledgerState st of
+    LedgerStateConway conway -> Just (shelleyLedgerState conway)
+    _ -> Nothing
+
+  applyNewEpochState st =
+    hApplyExtLedgerState $
+      fn id :* fn id :* fn id :* fn id :* fn id :* fn (applyNewEpochState' st) :* Nil
+
+hApplyExtLedgerState ::
+  NP (LedgerState -.-> LedgerState) (CardanoShelleyEras StandardCrypto) ->
+  ExtLedgerState CardanoBlock ->
+  ExtLedgerState CardanoBlock
+hApplyExtLedgerState f ledger =
+  case ledgerState ledger of
+    HardForkLedgerState hfState ->
+      let newHfState = hap (fn id :* f) hfState
+       in updateLedgerState $ HardForkLedgerState newHfState
+  where
+    updateLedgerState st = ledger {ledgerState = st}
+
+applyNewEpochState' ::
+  NewEpochState era ->
+  LedgerState (ShelleyBlock proto era) ->
+  LedgerState (ShelleyBlock proto era)
+applyNewEpochState' newEpochState' ledger =
+  ledger {shelleyLedgerState = newEpochState'}
+
+-- | A @Traversal@ that targets the @NewEpochState@ from the extended ledger state
+newEpochStateT ::
+  HasNewEpochState era =>
+  Traversal' (ExtLedgerState CardanoBlock) (NewEpochState era)
+newEpochStateT f ledger =
+  case getNewEpochState ledger of
+    Just newEpochState' -> flip applyNewEpochState ledger <$> f newEpochState'
+    Nothing -> pure ledger

@@ -7,7 +7,7 @@
 {-# OPTIONS_GHC -Wno-unused-matches #-}
 
 module Cardano.DbSync.Era.Universal.Insert.LedgerEvent (
-  insertBlockLedgerEvents,
+  insertNewEpochLedgerEvents,
 ) where
 
 import Cardano.BM.Trace (logInfo)
@@ -18,29 +18,33 @@ import Cardano.DbSync.Cache.Types (textShowStats)
 import Cardano.DbSync.Era.Cardano.Insert (insertEpochSyncTime)
 import qualified Cardano.DbSync.Era.Shelley.Generic as Generic
 import Cardano.DbSync.Era.Universal.Adjust (adjustEpochRewards)
-import Cardano.DbSync.Era.Universal.Epoch (insertInstantRewards, insertPoolDepositRefunds, insertRewards)
+import Cardano.DbSync.Era.Universal.Epoch (insertPoolDepositRefunds, insertProposalRefunds, insertRewardRests, insertRewards)
+import Cardano.DbSync.Era.Universal.Insert.GovAction
 import Cardano.DbSync.Era.Universal.Validate (validateEpochRewards)
 import Cardano.DbSync.Error
-import Cardano.DbSync.Ledger.Event (LedgerEvent (..))
+import Cardano.DbSync.Ledger.Event
 import Cardano.DbSync.Types
 import Cardano.DbSync.Util
+import qualified Cardano.Ledger.Address as Ledger
 import Cardano.Prelude
 import Cardano.Slotting.Slot (EpochNo (..))
+import Control.Monad.Extra (whenJust)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Database.Persist.SqlBackend.Internal
 import Database.Persist.SqlBackend.Internal.StatementCache
 
 --------------------------------------------------------------------------------------------
 -- Insert LedgerEvents
 --------------------------------------------------------------------------------------------
-insertBlockLedgerEvents ::
+insertNewEpochLedgerEvents ::
   (MonadBaseControl IO m, MonadIO m) =>
   SyncEnv ->
   EpochNo ->
   [LedgerEvent] ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertBlockLedgerEvents syncEnv currentEpochNo@(EpochNo curEpoch) =
+insertNewEpochLedgerEvents syncEnv currentEpochNo@(EpochNo curEpoch) =
   mapM_ handler
   where
     tracer = getTrace syncEnv
@@ -90,10 +94,24 @@ insertBlockLedgerEvents syncEnv currentEpochNo@(EpochNo curEpoch) =
           lift $ validateEpochRewards tracer ntw (subFromCurrentEpoch 2) currentEpochNo rwd
         LedgerAdaPots _ ->
           pure () -- These are handled separately by insertBlock
+        LedgerGovInfo enacted dropped expired uncl -> do
+          unless (Set.null uncl) $
+            liftIO $
+              logInfo tracer $
+                "Found " <> textShow (Set.size uncl) <> " unclaimed proposal refunds"
+          updateDropped cache (EpochNo curEpoch) (garGovActionId <$> (dropped <> expired))
+          let refunded = filter (\e -> Set.notMember (garGovActionId e) uncl) (enacted <> dropped <> expired)
+          insertProposalRefunds tracer ntw (subFromCurrentEpoch 1) currentEpochNo cache refunded -- TODO: check if they are disjoint to avoid double entries.
+          forM_ enacted $ \gar -> do
+            gaId <- resolveGovActionProposal cache (garGovActionId gar)
+            lift $ void $ DB.updateGovActionEnacted gaId (unEpochNo currentEpochNo)
+            whenJust (garMTreasury gar) $ \treasuryMap -> do
+              let rewards = Map.mapKeys Ledger.raCredential $ Map.map (Set.singleton . mkTreasuryReward) treasuryMap
+              insertRewardRests tracer ntw (subFromCurrentEpoch 1) currentEpochNo cache (Map.toList rewards)
         LedgerMirDist rwd -> do
           unless (Map.null rwd) $ do
             let rewards = Map.toList rwd
-            insertInstantRewards ntw (subFromCurrentEpoch 1) currentEpochNo cache rewards
+            insertRewardRests tracer ntw (subFromCurrentEpoch 1) currentEpochNo cache rewards
             liftIO . logInfo tracer $ "Inserted " <> show (length rewards) <> " Mir rewards"
         LedgerPoolReap en drs ->
           unless (Map.null $ Generic.unRewards drs) $ do

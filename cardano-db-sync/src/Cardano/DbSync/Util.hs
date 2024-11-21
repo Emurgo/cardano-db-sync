@@ -1,8 +1,13 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+
+#if __GLASGOW_HASKELL__ >= 908
+{-# OPTIONS_GHC -Wno-x-partial #-}
+#endif
 
 module Cardano.DbSync.Util (
   cardanoBlockSlotNo,
@@ -28,6 +33,8 @@ module Cardano.DbSync.Util (
   splitLast,
   traverseMEither,
   whenStrictJust,
+  whenStrictJustDefault,
+  whenDefault,
   whenMaybe,
   mlookup,
   whenRight,
@@ -36,7 +43,7 @@ module Cardano.DbSync.Util (
 ) where
 
 import Cardano.BM.Trace (Trace, logError, logInfo)
-import Cardano.Db (RewardSource (..), textShow)
+import Cardano.Db (RewardSource (..))
 import Cardano.DbSync.Config.Types ()
 import Cardano.DbSync.Types
 import Cardano.Ledger.Coin (Coin (..))
@@ -55,7 +62,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Time.Clock as Time
 import Ouroboros.Consensus.Block.Abstract (ConvertRawHash (..))
-import Ouroboros.Consensus.Protocol.Praos.Translate ()
+import Ouroboros.Consensus.Protocol.Praos ()
 import Ouroboros.Consensus.Shelley.HFEras ()
 import Ouroboros.Consensus.Shelley.Ledger.SupportsProtocol ()
 import Ouroboros.Network.Block (blockSlot, getPoint)
@@ -180,6 +187,15 @@ whenStrictJust ma f =
   case ma of
     Strict.Nothing -> pure ()
     Strict.Just a -> f a
+
+whenStrictJustDefault :: Applicative m => b -> Strict.Maybe a -> (a -> m b) -> m b
+whenStrictJustDefault b ma f =
+  case ma of
+    Strict.Nothing -> pure b
+    Strict.Just a -> f a
+
+whenDefault :: Applicative m => a -> Bool -> m a -> m a
+whenDefault a bl ma = if bl then ma else pure a
 
 whenMaybe :: Monad m => Maybe a -> (a -> m b) -> m (Maybe b)
 whenMaybe (Just a) f = Just <$> f a

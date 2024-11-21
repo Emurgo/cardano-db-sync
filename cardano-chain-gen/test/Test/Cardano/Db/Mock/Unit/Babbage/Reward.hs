@@ -51,9 +51,9 @@ import Test.Cardano.Db.Mock.UnifiedApi (
 import Test.Cardano.Db.Mock.Validate (
   assertBlockNoBackoff,
   assertCurrentEpoch,
-  assertInstantRewardCount,
   assertRewardCount,
   assertRewardCounts,
+  assertRewardRestCount,
  )
 import Test.Tasty.HUnit (Assertion)
 
@@ -567,6 +567,6 @@ singleMIRCertMultiOut =
     b <- fillUntilNextEpoch interpreter mockServer
 
     assertBlockNoBackoff dbSync (2 + length a + length b)
-    assertInstantRewardCount dbSync 4
+    assertRewardRestCount dbSync 4
   where
     testLabel = "singleMIRCertMultiOut"

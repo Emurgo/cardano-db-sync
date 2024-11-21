@@ -19,6 +19,7 @@ import Cardano.DbSync.Era.Shelley.Generic.Tx.Alonzo
 import Cardano.DbSync.Era.Shelley.Generic.Tx.Shelley
 import Cardano.DbSync.Era.Shelley.Generic.Tx.Types
 import Cardano.DbSync.Era.Shelley.Generic.Witness
+import Cardano.Ledger.Allegra.Scripts (Timelock)
 import qualified Cardano.Ledger.Alonzo.Scripts as Alonzo
 import qualified Cardano.Ledger.Alonzo.Tx as Alonzo
 import Cardano.Ledger.Babbage.Core as Core hiding (Tx, TxOut)
@@ -38,7 +39,9 @@ fromBabbageTx :: Bool -> Maybe Alonzo.Prices -> (Word64, Core.Tx StandardBabbage
 fromBabbageTx ioExtraPlutus mprices (blkIndex, tx) =
   Tx
     { txHash = txHashId tx
+    , txLedgerTxId = mkTxId tx
     , txBlockIndex = blkIndex
+    , txCBOR = getTxCBOR tx
     , txSize = getTxSize tx
     , txValidContract = isValid2
     , txInputs =
@@ -76,6 +79,7 @@ fromBabbageTx ioExtraPlutus mprices (blkIndex, tx) =
     , txExtraKeyWitnesses = extraKeyWits txBody
     , txVotingProcedure = []
     , txProposalProcedure = []
+    , txTreasuryDonation = mempty -- Babbage does not support treasury donations
     }
   where
     txBody :: Core.TxBody StandardBabbage
@@ -114,6 +118,7 @@ fromTxOut ::
   , Core.TxOut era ~ BabbageTxOut era
   , Core.Script era ~ Alonzo.AlonzoScript era
   , DBPlutusScript era
+  , NativeScript era ~ Timelock era
   ) =>
   Word64 ->
   BabbageTxOut era ->
@@ -137,6 +142,7 @@ fromScript ::
   ( EraCrypto era ~ StandardCrypto
   , Core.Script era ~ Alonzo.AlonzoScript era
   , DBPlutusScript era
+  , NativeScript era ~ Timelock era
   ) =>
   Alonzo.AlonzoScript era ->
   TxScript

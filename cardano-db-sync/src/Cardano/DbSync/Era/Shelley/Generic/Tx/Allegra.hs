@@ -19,9 +19,11 @@ import Cardano.DbSync.Era.Shelley.Generic.Metadata
 import Cardano.DbSync.Era.Shelley.Generic.Script (fromTimelock)
 import Cardano.DbSync.Era.Shelley.Generic.Tx.Shelley (
   calcWithdrawalSum,
+  getTxCBOR,
   getTxMetadata,
   getTxSize,
   mkTxCertificates,
+  mkTxId,
   mkTxIn,
   mkTxOut,
   mkTxParamProposal,
@@ -49,7 +51,9 @@ fromAllegraTx :: (Word64, Core.Tx StandardAllegra) -> Tx
 fromAllegraTx (blkIndex, tx) =
   Tx
     { txHash = txHashId tx
+    , txLedgerTxId = mkTxId tx
     , txBlockIndex = blkIndex
+    , txCBOR = getTxCBOR tx
     , txSize = getTxSize tx
     , txValidContract = True
     , txInputs = mkTxIn txBody
@@ -74,6 +78,7 @@ fromAllegraTx (blkIndex, tx) =
     , txExtraKeyWitnesses = []
     , txVotingProcedure = []
     , txProposalProcedure = []
+    , txTreasuryDonation = mempty -- Allegra does not support treasury donations
     }
   where
     txBody :: Core.TxBody StandardAllegra
@@ -89,7 +94,7 @@ fromAllegraTx (blkIndex, tx) =
 
 getScripts ::
   forall era.
-  (EraCrypto era ~ StandardCrypto, Core.Tx era ~ ShelleyTx era, TxAuxData era ~ AllegraTxAuxData era, Script era ~ Timelock era, EraTx era) =>
+  (EraCrypto era ~ StandardCrypto, NativeScript era ~ Timelock era, AllegraEraScript era, Core.Tx era ~ ShelleyTx era, TxAuxData era ~ AllegraTxAuxData era, Script era ~ Timelock era, EraTx era) =>
   ShelleyTx era ->
   [TxScript]
 getScripts tx =
@@ -110,7 +115,7 @@ getAuxScripts maux =
       map (\scr -> (Core.hashScript @era scr, scr)) $ toList scrs
 
 mkTxScript ::
-  (Era era) =>
+  (NativeScript era ~ Timelock era, AllegraEraScript era) =>
   (ScriptHash StandardCrypto, Timelock era) ->
   TxScript
 mkTxScript (hsh, script) =

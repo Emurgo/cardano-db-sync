@@ -13,21 +13,25 @@
 
 module Cardano.DbSync.Ledger.Event (
   LedgerEvent (..),
+  GovActionRefunded (..),
   convertAuxLedgerEvent,
+  mkTreasuryReward,
   convertPoolRewards,
   ledgerEventName,
   splitDeposits,
 ) where
 
-import Cardano.Db hiding (AdaPots, EpochNo, SyncState, epochNo)
+import Cardano.Db hiding (AdaPots, EpochNo, SyncState, TreasuryWithdrawals, epochNo)
 import qualified Cardano.DbSync.Era.Shelley.Generic as Generic
 import Cardano.DbSync.Era.Shelley.Generic.Tx.Shelley
 import Cardano.DbSync.Types
 import Cardano.DbSync.Util
+import Cardano.Ledger.Address (RewardAccount)
 import qualified Cardano.Ledger.Allegra.Rules as Allegra
 import Cardano.Ledger.Alonzo.Rules (AlonzoBbodyEvent (..), AlonzoUtxoEvent (..), AlonzoUtxowEvent (..))
 import qualified Cardano.Ledger.Alonzo.Rules as Alonzo
 import Cardano.Ledger.Coin (Coin (..))
+import Cardano.Ledger.Conway.Governance
 import Cardano.Ledger.Conway.Rules as Conway
 import qualified Cardano.Ledger.Core as Ledger
 import Cardano.Ledger.SafeHash (SafeHash)
@@ -63,16 +67,25 @@ import Ouroboros.Consensus.Shelley.Ledger (ShelleyBlock, ShelleyLedgerEvent (..)
 import Ouroboros.Consensus.TypeFamilyWrappers
 
 data LedgerEvent
-  = LedgerMirDist !(Map StakeCred (Set Generic.InstantReward))
+  = LedgerMirDist !(Map StakeCred (Set Generic.RewardRest))
   | LedgerPoolReap !EpochNo !Generic.Rewards
   | LedgerIncrementalRewards !EpochNo !Generic.Rewards
   | LedgerDeltaRewards !EpochNo !Generic.Rewards
   | LedgerRestrainedRewards !EpochNo !Generic.Rewards !(Set StakeCred)
   | LedgerTotalRewards !EpochNo !(Map StakeCred (Set (Ledger.Reward StandardCrypto)))
   | LedgerAdaPots !AdaPots
+  | LedgerGovInfo [GovActionRefunded] [GovActionRefunded] [GovActionRefunded] (Set (GovActionId StandardCrypto))
   | LedgerDeposits (SafeHash StandardCrypto Ledger.EraIndependentTxBody) Coin
   | LedgerStartAtEpoch !EpochNo
   | LedgerNewEpoch !EpochNo !SyncState
+  deriving (Eq)
+
+data GovActionRefunded = GovActionRefunded
+  { garGovActionId :: GovActionId StandardCrypto
+  , garDeposit :: Coin
+  , garReturnAddr :: RewardAccount StandardCrypto
+  , garMTreasury :: Maybe (Map (RewardAccount StandardCrypto) Coin)
+  }
   deriving (Eq)
 
 instance Ord LedgerEvent where
@@ -87,9 +100,10 @@ toOrdering ev = case ev of
   LedgerRestrainedRewards {} -> 4
   LedgerTotalRewards {} -> 5
   LedgerAdaPots {} -> 6
-  LedgerDeposits {} -> 7
-  LedgerStartAtEpoch {} -> 8
-  LedgerNewEpoch {} -> 9
+  LedgerGovInfo {} -> 7
+  LedgerDeposits {} -> 8
+  LedgerStartAtEpoch {} -> 9
+  LedgerNewEpoch {} -> 10
 
 convertAuxLedgerEvent :: Bool -> OneEraLedgerEvent (CardanoEras StandardCrypto) -> Maybe LedgerEvent
 convertAuxLedgerEvent hasRewards = toLedgerEvent hasRewards . wrappedAuxLedgerEvent
@@ -104,6 +118,7 @@ ledgerEventName le =
     LedgerRestrainedRewards {} -> "LedgerRestrainedRewards"
     LedgerTotalRewards {} -> "LedgerTotalRewards"
     LedgerAdaPots {} -> "LedgerAdaPots"
+    LedgerGovInfo {} -> "LedgerGovInfo"
     LedgerDeposits {} -> "LedgerDeposits"
     LedgerStartAtEpoch {} -> "LedgerStartAtEpoch"
     LedgerNewEpoch {} -> "LedgerNewEpoch"
@@ -234,7 +249,32 @@ toLedgerEventConway evt hasRewards =
       ( TickNewEpochEvent
           (Conway.TotalAdaPotsEvent p)
         ) -> Just $ LedgerAdaPots p
+    ShelleyLedgerEventTICK
+      ( TickNewEpochEvent
+          ( Conway.EpochEvent
+              (Conway.GovInfoEvent en droppedEnacted expired uncl)
+            )
+        ) ->
+        Just $
+          LedgerGovInfo
+            (toGovActionRefunded <$> toList en)
+            (toGovActionRefunded <$> toList droppedEnacted)
+            (toGovActionRefunded <$> toList expired)
+            (Map.keysSet uncl)
     _ -> Nothing
+  where
+    toGovActionRefunded :: EraCrypto era ~ StandardCrypto => GovActionState era -> GovActionRefunded
+    toGovActionRefunded gas =
+      GovActionRefunded
+        { garGovActionId = gasId gas
+        , garDeposit = pProcDeposit $ gasProposalProcedure gas
+        , garReturnAddr = pProcReturnAddr $ gasProposalProcedure gas
+        , garMTreasury = mWithrawal
+        }
+      where
+        mWithrawal = case pProcGovAction (gasProposalProcedure gas) of
+          TreasuryWithdrawals mp _ -> Just mp
+          _ -> Nothing
 
 instance All ConvertLedgerEvent xs => ConvertLedgerEvent (HardForkBlock xs) where
   toLedgerEvent hasRewards =
@@ -266,23 +306,30 @@ convertPoolDepositRefunds rwds =
 convertMirRewards ::
   Map StakeCred Coin ->
   Map StakeCred Coin ->
-  Map StakeCred (Set Generic.InstantReward)
+  Map StakeCred (Set Generic.RewardRest)
 convertMirRewards resPay trePay =
   Map.unionWith Set.union (convertResPay resPay) (convertTrePay trePay)
   where
-    convertResPay :: Map StakeCred Coin -> Map StakeCred (Set Generic.InstantReward)
+    convertResPay :: Map StakeCred Coin -> Map StakeCred (Set Generic.RewardRest)
     convertResPay = Map.map (mkPayment RwdReserves)
 
-    convertTrePay :: Map StakeCred Coin -> Map StakeCred (Set Generic.InstantReward)
+    convertTrePay :: Map StakeCred Coin -> Map StakeCred (Set Generic.RewardRest)
     convertTrePay = Map.map (mkPayment RwdTreasury)
 
-    mkPayment :: RewardSource -> Coin -> Set Generic.InstantReward
+    mkPayment :: RewardSource -> Coin -> Set Generic.RewardRest
     mkPayment src coin =
       Set.singleton $
-        Generic.InstantReward
+        Generic.RewardRest
           { Generic.irSource = src
           , Generic.irAmount = coin
           }
+
+mkTreasuryReward :: Coin -> Generic.RewardRest
+mkTreasuryReward c =
+  Generic.RewardRest
+    { Generic.irSource = RwdTreasury
+    , Generic.irAmount = c
+    }
 
 convertPoolRewards ::
   Map StakeCred (Set (Ledger.Reward StandardCrypto)) ->
@@ -385,7 +432,7 @@ pattern LEDepositsConway ::
   , Event (Ledger.EraRule "LEDGER" ledgerera) ~ ConwayLedgerEvent ledgerera
   , Event (Ledger.EraRule "UTXOW" ledgerera) ~ AlonzoUtxowEvent ledgerera
   , Event (Ledger.EraRule "UTXO" ledgerera) ~ AlonzoUtxoEvent ledgerera
-  , Event (Ledger.EraRule "UTXOS" ledgerera) ~ Alonzo.AlonzoUtxosEvent ledgerera
+  , Event (Ledger.EraRule "UTXOS" ledgerera) ~ Conway.ConwayUtxosEvent ledgerera
   ) =>
   SafeHash StandardCrypto Ledger.EraIndependentTxBody ->
   Coin ->
@@ -399,7 +446,7 @@ pattern LEDepositsConway hsh coin <-
                     ( WrappedShelleyEraEvent
                         ( UtxoEvent
                             ( UtxosEvent
-                                (Alonzo.TotalDeposits hsh coin)
+                                (Conway.TotalDeposits hsh coin)
                               )
                           )
                       )

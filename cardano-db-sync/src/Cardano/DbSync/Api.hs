@@ -9,13 +9,10 @@
 
 module Cardano.DbSync.Api (
   extractInsertOptions,
-  fullInsertOptions,
-  onlyUTxOInsertOptions,
-  onlyGovInsertOptions,
-  disableAllInsertOptions,
   setConsistentLevel,
   getConsistentLevel,
   isConsistent,
+  getIsConsumedFixed,
   noneFixed,
   isDataFixed,
   getIsSyncFixed,
@@ -26,10 +23,14 @@ module Cardano.DbSync.Api (
   runIndexMigrations,
   initPruneConsumeMigration,
   runExtraMigrationsMaybe,
+  runAddJsonbToSchema,
+  runRemoveJsonbFromSchema,
   getSafeBlockNoDiff,
   getPruneInterval,
   whenConsumeOrPruneTxOut,
   whenPruneTxOut,
+  getTxOutTableType,
+  getPruneConsume,
   getHasConsumedOrPruneTxOut,
   getSkipTxIn,
   getPrunes,
@@ -55,7 +56,7 @@ import qualified Cardano.Chain.Genesis as Byron
 import Cardano.Crypto.ProtocolMagic (ProtocolMagicId (..))
 import qualified Cardano.Db as DB
 import Cardano.DbSync.Api.Types
-import Cardano.DbSync.Cache.Types (newEmptyCache, uninitiatedCache)
+import Cardano.DbSync.Cache.Types (CacheCapacity (..), newEmptyCache, useNoCache)
 import Cardano.DbSync.Config.Cardano
 import Cardano.DbSync.Config.Shelley
 import Cardano.DbSync.Config.Types
@@ -114,6 +115,16 @@ isConsistent env = do
     Consistent -> pure True
     _ -> pure False
 
+getIsConsumedFixed :: SyncEnv -> IO (Maybe Word64)
+getIsConsumedFixed env =
+  case (DB.pcmPruneTxOut pcm, DB.pcmConsumedTxOut pcm) of
+    (False, True) -> Just <$> DB.runDbIohkNoLogging backend (DB.queryWrongConsumedBy txOutTableType)
+    _ -> pure Nothing
+  where
+    txOutTableType = getTxOutTableType env
+    pcm = soptPruneConsumeMigration $ envOptions env
+    backend = envBackend env
+
 noneFixed :: FixesRan -> Bool
 noneFixed NoneFixRan = True
 noneFixed _ = False
@@ -157,7 +168,7 @@ initPruneConsumeMigration :: Bool -> Bool -> Bool -> Bool -> DB.PruneConsumeMigr
 initPruneConsumeMigration consumed pruneTxOut bootstrap forceTxIn' =
   DB.PruneConsumeMigration
     { DB.pcmPruneTxOut = pruneTxOut || bootstrap
-    , DB.pcmConsumeOrPruneTxOut = consumed || pruneTxOut || bootstrap
+    , DB.pcmConsumedTxOut = consumed || pruneTxOut || bootstrap
     , DB.pcmSkipTxIn = not forceTxIn' && (consumed || pruneTxOut || bootstrap)
     }
 
@@ -167,12 +178,22 @@ getPruneConsume = soptPruneConsumeMigration . envOptions
 runExtraMigrationsMaybe :: SyncEnv -> IO ()
 runExtraMigrationsMaybe syncEnv = do
   let pcm = getPruneConsume syncEnv
-  logInfo (getTrace syncEnv) $ textShow pcm
+      txOutTableType = getTxOutTableType syncEnv
+  logInfo (getTrace syncEnv) $ "runExtraMigrationsMaybe: " <> textShow pcm
   DB.runDbIohkNoLogging (envBackend syncEnv) $
     DB.runExtraMigrations
       (getTrace syncEnv)
+      txOutTableType
       (getSafeBlockNoDiff syncEnv)
       pcm
+
+runAddJsonbToSchema :: SyncEnv -> IO ()
+runAddJsonbToSchema syncEnv =
+  void $ DB.runDbIohkNoLogging (envBackend syncEnv) DB.enableJsonbInSchema
+
+runRemoveJsonbFromSchema :: SyncEnv -> IO ()
+runRemoveJsonbFromSchema syncEnv =
+  void $ DB.runDbIohkNoLogging (envBackend syncEnv) DB.disableJsonbInSchema
 
 getSafeBlockNoDiff :: SyncEnv -> Word64
 getSafeBlockNoDiff syncEnv = 2 * getSecurityParam syncEnv
@@ -182,15 +203,18 @@ getPruneInterval syncEnv = 10 * getSecurityParam syncEnv
 
 whenConsumeOrPruneTxOut :: (MonadIO m) => SyncEnv -> m () -> m ()
 whenConsumeOrPruneTxOut env =
-  when (DB.pcmConsumeOrPruneTxOut $ getPruneConsume env)
+  when (DB.pcmConsumedTxOut $ getPruneConsume env)
 
 whenPruneTxOut :: (MonadIO m) => SyncEnv -> m () -> m ()
 whenPruneTxOut env =
   when (DB.pcmPruneTxOut $ getPruneConsume env)
 
+getTxOutTableType :: SyncEnv -> DB.TxOutTableType
+getTxOutTableType syncEnv = ioTxOutTableType . soptInsertOptions $ envOptions syncEnv
+
 getHasConsumedOrPruneTxOut :: SyncEnv -> Bool
 getHasConsumedOrPruneTxOut =
-  DB.pcmConsumeOrPruneTxOut . getPruneConsume
+  DB.pcmConsumedTxOut . getPruneConsume
 
 getSkipTxIn :: SyncEnv -> Bool
 getSkipTxIn =
@@ -201,96 +225,36 @@ getPrunes = do
   DB.pcmPruneTxOut . getPruneConsume
 
 extractInsertOptions :: SyncPreConfig -> SyncInsertOptions
-extractInsertOptions cfg =
-  case pcInsertConfig cfg of
-    FullInsertOptions -> fullInsertOptions
-    OnlyUTxOInsertOptions -> onlyUTxOInsertOptions
-    OnlyGovInsertOptions -> onlyGovInsertOptions
-    DisableAllInsertOptions -> disableAllInsertOptions
-    SyncInsertConfig opts -> opts
+extractInsertOptions = sicOptions . pcInsertConfig
 
-fullInsertOptions :: SyncInsertOptions
-fullInsertOptions =
-  SyncInsertOptions
-    { sioTxOut = TxOutEnable
-    , sioLedger = LedgerEnable
-    , sioShelley = ShelleyEnable
-    , sioRewards = RewardsConfig True
-    , sioMultiAsset = MultiAssetEnable
-    , sioMetadata = MetadataEnable
-    , sioPlutus = PlutusEnable
-    , sioGovernance = GovernanceConfig True
-    , sioOffchainPoolData = OffchainPoolDataConfig True
-    , sioJsonType = JsonTypeText
-    }
-
-onlyUTxOInsertOptions :: SyncInsertOptions
-onlyUTxOInsertOptions =
-  SyncInsertOptions
-    { sioTxOut = TxOutBootstrap (ForceTxIn False)
-    , sioLedger = LedgerIgnore
-    , sioShelley = ShelleyDisable
-    , sioRewards = RewardsConfig True
-    , sioMultiAsset = MultiAssetDisable
-    , sioMetadata = MetadataDisable
-    , sioPlutus = PlutusDisable
-    , sioGovernance = GovernanceConfig False
-    , sioOffchainPoolData = OffchainPoolDataConfig False
-    , sioJsonType = JsonTypeText
-    }
-
-onlyGovInsertOptions :: SyncInsertOptions
-onlyGovInsertOptions =
-  disableAllInsertOptions
-    { sioLedger = LedgerEnable
-    , sioGovernance = GovernanceConfig True
-    }
-
-disableAllInsertOptions :: SyncInsertOptions
-disableAllInsertOptions =
-  SyncInsertOptions
-    { sioTxOut = TxOutDisable
-    , sioLedger = LedgerDisable
-    , sioShelley = ShelleyDisable
-    , sioRewards = RewardsConfig False
-    , sioMultiAsset = MultiAssetDisable
-    , sioMetadata = MetadataDisable
-    , sioPlutus = PlutusDisable
-    , sioOffchainPoolData = OffchainPoolDataConfig False
-    , sioGovernance = GovernanceConfig False
-    , sioJsonType = JsonTypeText
-    }
-
-initEpochState :: EpochState
-initEpochState =
-  EpochState
-    { esInitialized = False
-    , esEpochNo = Strict.Nothing
+initCurrentEpochNo :: CurrentEpochNo
+initCurrentEpochNo =
+  CurrentEpochNo
+    { cenEpochNo = Strict.Nothing
     }
 
 generateNewEpochEvents :: SyncEnv -> SlotDetails -> STM [LedgerEvent]
 generateNewEpochEvents env details = do
-  !oldEpochState <- readTVar (envEpochState env)
-  writeTVar (envEpochState env) newEpochState
-  pure $ maybeToList (newEpochEvent oldEpochState)
+  !lastEpochNo <- readTVar (envCurrentEpochNo env)
+  writeTVar (envCurrentEpochNo env) newCurrentEpochNo
+  pure $ maybeToList (newEpochEvent lastEpochNo)
   where
     currentEpochNo :: EpochNo
     currentEpochNo = sdEpochNo details
 
-    newEpochEvent :: EpochState -> Maybe LedgerEvent
-    newEpochEvent oldEpochState =
-      case esEpochNo oldEpochState of
+    newEpochEvent :: CurrentEpochNo -> Maybe LedgerEvent
+    newEpochEvent lastEpochNo =
+      case cenEpochNo lastEpochNo of
         Strict.Nothing -> Just $ LedgerStartAtEpoch currentEpochNo
-        Strict.Just oldEpoch ->
-          if currentEpochNo == 1 + oldEpoch
-            then Just $ LedgerNewEpoch currentEpochNo (getSyncStatus details)
-            else Nothing
+        Strict.Just oldEpoch
+          | currentEpochNo == EpochNo (1 + unEpochNo oldEpoch) ->
+              Just $ LedgerNewEpoch currentEpochNo (getSyncStatus details)
+        _ -> Nothing
 
-    newEpochState :: EpochState
-    newEpochState =
-      EpochState
-        { esInitialized = True
-        , esEpochNo = Strict.Just currentEpochNo
+    newCurrentEpochNo :: CurrentEpochNo
+    newCurrentEpochNo =
+      CurrentEpochNo
+        { cenEpochNo = Strict.Just currentEpochNo
         }
 
 getTopLevelConfig :: SyncEnv -> TopLevelConfig CardanoBlock
@@ -353,9 +317,9 @@ logDbState env = do
     showTip tipInfo =
       mconcat
         [ "slot "
-        , DB.textShow (unSlotNo $ bSlotNo tipInfo)
+        , textShow (unSlotNo $ bSlotNo tipInfo)
         , ", block "
-        , DB.textShow (unBlockNo $ bBlockNo tipInfo)
+        , textShow (unBlockNo $ bBlockNo tipInfo)
         ]
 
     tracer :: Trace IO Text
@@ -384,18 +348,28 @@ mkSyncEnv ::
   IO SyncEnv
 mkSyncEnv trce backend connectionString syncOptions protoInfo nw nwMagic systemStart syncNodeConfigFromFile syncNP ranMigrations runMigrationFnc = do
   dbCNamesVar <- newTVarIO =<< dbConstraintNamesExists backend
-  cache <- if soptCache syncOptions then newEmptyCache 250000 50000 else pure uninitiatedCache
+  cache <-
+    if soptCache syncOptions
+      then
+        newEmptyCache
+          CacheCapacity
+            { cacheCapacityStake = 100000
+            , cacheCapacityDatum = 250000
+            , cacheCapacityMultiAsset = 250000
+            , cacheCapacityTx = 100000
+            }
+      else pure useNoCache
   consistentLevelVar <- newTVarIO Unchecked
   fixDataVar <- newTVarIO $ if ranMigrations then DataFixRan else NoneFixRan
   indexesVar <- newTVarIO $ enpForceIndexes syncNP
-  bts <- getBootstrapInProgress trce (isTxOutBootstrap' syncNodeConfigFromFile) backend
+  bts <- getBootstrapInProgress trce (isTxOutConsumedBootstrap' syncNodeConfigFromFile) backend
   bootstrapVar <- newTVarIO bts
   -- Offline Pool + Anchor queues
   opwq <- newTBQueueIO 1000
   oprq <- newTBQueueIO 1000
   oawq <- newTBQueueIO 1000
   oarq <- newTBQueueIO 1000
-  epochVar <- newTVarIO initEpochState
+  epochVar <- newTVarIO initCurrentEpochNo
   epochSyncTime <- newTVarIO =<< getCurrentTime
   ledgerEnvType <-
     case (enpMaybeLedgerStateDir syncNP, hasLedger' syncNodeConfigFromFile) of
@@ -425,7 +399,7 @@ mkSyncEnv trce backend connectionString syncOptions protoInfo nw nwMagic systemS
       , envConnectionString = connectionString
       , envConsistentLevel = consistentLevelVar
       , envDbConstraints = dbCNamesVar
-      , envEpochState = epochVar
+      , envCurrentEpochNo = epochVar
       , envEpochSyncTime = epochSyncTime
       , envIndexes = indexesVar
       , envIsFixed = fixDataVar
@@ -442,7 +416,7 @@ mkSyncEnv trce backend connectionString syncOptions protoInfo nw nwMagic systemS
       }
   where
     hasLedger' = hasLedger . sioLedger . dncInsertOptions
-    isTxOutBootstrap' = isTxOutBootstrap . sioTxOut . dncInsertOptions
+    isTxOutConsumedBootstrap' = isTxOutConsumedBootstrap . sioTxOut . dncInsertOptions
 
 mkSyncEnvFromConfig ::
   Trace IO Text ->
@@ -466,9 +440,9 @@ mkSyncEnvFromConfig trce backend connectionString syncOptions genCfg syncNodeCon
             . SNErrCardanoConfig
             $ mconcat
               [ "ProtocolMagicId "
-              , DB.textShow (unProtocolMagicId $ Byron.configProtocolMagicId bCfg)
+              , textShow (unProtocolMagicId $ Byron.configProtocolMagicId bCfg)
               , " /= "
-              , DB.textShow (Shelley.sgNetworkMagic $ scConfig sCfg)
+              , textShow (Shelley.sgNetworkMagic $ scConfig sCfg)
               ]
       | Byron.gdStartTime (Byron.configGenesisData bCfg) /= Shelley.sgSystemStart (scConfig sCfg) ->
           pure
@@ -476,9 +450,9 @@ mkSyncEnvFromConfig trce backend connectionString syncOptions genCfg syncNodeCon
             . SNErrCardanoConfig
             $ mconcat
               [ "SystemStart "
-              , DB.textShow (Byron.gdStartTime $ Byron.configGenesisData bCfg)
+              , textShow (Byron.gdStartTime $ Byron.configGenesisData bCfg)
               , " /= "
-              , DB.textShow (Shelley.sgSystemStart $ scConfig sCfg)
+              , textShow (Shelley.sgSystemStart $ scConfig sCfg)
               ]
       | otherwise ->
           Right

@@ -1,6 +1,8 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Cardano.DbSync.Types (
   BlockDetails (..),
@@ -53,6 +55,7 @@ import qualified Cardano.Ledger.Credential as Ledger
 import Cardano.Ledger.Crypto (StandardCrypto)
 import qualified Cardano.Ledger.Hashes as Ledger
 import Cardano.Ledger.Keys
+
 import Cardano.Prelude hiding (Meta, show)
 import Cardano.Slotting.Slot (EpochNo (..), EpochSize (..), SlotNo (..))
 import qualified Data.Text as Text
@@ -150,7 +153,9 @@ data OffChainVoteResult
   | OffChainVoteResultError !OffChainVoteFetchError
 
 data OffChainVoteAccessors = OffChainVoteAccessors
-  { offChainVoteAuthors :: DB.OffChainVoteDataId -> [OffChainVoteAuthor]
+  { offChainVoteGovAction :: DB.OffChainVoteDataId -> Maybe DB.OffChainVoteGovActionData
+  , offChainVoteDrep :: DB.OffChainVoteDataId -> Maybe DB.OffChainVoteDrepData
+  , offChainVoteAuthors :: DB.OffChainVoteDataId -> [OffChainVoteAuthor]
   , offChainVoteReferences :: DB.OffChainVoteDataId -> [OffChainVoteReference]
   , offChainVoteExternalUpdates :: DB.OffChainVoteDataId -> [OffChainVoteExternalUpdate]
   }
@@ -215,7 +220,7 @@ showUrl =
 -- OffChain Fetch error for the HTTP client fetching the pool offchain metadata.
 -------------------------------------------------------------------------------------
 data OffChainFetchError
-  = OCFErrHashMismatch !OffChainUrlType !Text !Text
+  = OCFErrHashMismatch !(Maybe OffChainUrlType) !Text !Text
   | OCFErrDataTooLong !OffChainUrlType
   | OCFErrUrlParseFail !OffChainUrlType !Text
   | OCFErrJsonDecodeFail (Maybe OffChainUrlType) !Text
@@ -226,6 +231,8 @@ data OffChainFetchError
   | OCFErrIOException !Text
   | OCFErrTimeout !OffChainUrlType !Text
   | OCFErrConnectionFailure !OffChainUrlType
+  | OCFErrNoIpfsGateway !OffChainUrlType
+  | OCFErrIpfsGatewayFailures !OffChainUrlType [OffChainFetchError]
   deriving (Eq, Generic)
 
 instance Exception OffChainFetchError
@@ -236,7 +243,7 @@ instance Show OffChainFetchError where
       OCFErrHashMismatch url xpt act ->
         mconcat
           [ "Hash mismatch when fetching metadata from "
-          , show url
+          , showMUrl url
           , ". Expected "
           , show xpt
           , " but got "
@@ -251,7 +258,7 @@ instance Show OffChainFetchError where
           [fetchUrlToString url, "URL parse error for ", show url, " resulted in : ", show err]
       OCFErrJsonDecodeFail url err ->
         mconcat
-          [fetchMUtlToString url, "JSON decode error from when fetching metadata from ", show url, " resulted in : ", show err]
+          [fetchMUrlToString url, "JSON decode error from when fetching metadata from ", show url, " resulted in : ", show err]
       OCFErrHttpException url err ->
         mconcat [fetchUrlToString url, "HTTP Exception error for ", show url, " resulted in : ", show err]
       OCFErrHttpResponse url sc msg ->
@@ -264,11 +271,20 @@ instance Show OffChainFetchError where
         mconcat [fetchUrlToString url, "Timeout error when fetching metadata from ", show url, ": ", show ctx]
       OCFErrConnectionFailure url ->
         mconcat
-          [fetchUrlToString url, "Connection failure error when fetching metadata from ", show url, "'."]
+          [fetchUrlToString url, "Connection failure error when fetching metadata from ", show url, "."]
       OCFErrIOException err -> "IO Exception: " <> show err
+      OCFErrNoIpfsGateway url ->
+        mconcat [fetchUrlToString url, "No ipfs_gateway provided in the db-sync config"]
+      OCFErrIpfsGatewayFailures url errs ->
+        mconcat $ [fetchUrlToString url, "List of errors for each ipfs gateway: "] <> fmap show errs
 
-fetchMUtlToString :: Maybe OffChainUrlType -> String
-fetchMUtlToString = \case
+showMUrl :: Maybe OffChainUrlType -> String
+showMUrl = \case
+  Nothing -> "unknown URL"
+  Just url -> show url
+
+fetchMUrlToString :: Maybe OffChainUrlType -> String
+fetchMUrlToString = \case
   Nothing -> ""
   Just url -> fetchUrlToString url
 

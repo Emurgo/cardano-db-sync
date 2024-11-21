@@ -3,6 +3,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
@@ -11,6 +12,10 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+
+#if __GLASGOW_HASKELL__ >= 908
+{-# OPTIONS_GHC -Wno-x-partial #-}
+#endif
 
 module Cardano.DbSync.Ledger.State (
   applyBlock,
@@ -29,6 +34,7 @@ module Cardano.DbSync.Ledger.State (
   runLedgerStateWriteThread,
   getStakeSlice,
   getSliceMeta,
+  findProposedCommittee,
 ) where
 
 import Cardano.BM.Trace (Trace, logInfo, logWarning)
@@ -70,6 +76,7 @@ import qualified Data.ByteString.Base16 as Base16
 
 import Cardano.DbSync.Api.Types (InsertOptions (..), LedgerEnv (..), SyncOptions (..))
 import Cardano.DbSync.Error (SyncNodeError (..), fromEitherSTM)
+import Cardano.Ledger.BaseTypes (StrictMaybe)
 import Cardano.Ledger.Conway.Core as Shelley
 import Cardano.Ledger.Conway.Governance
 import qualified Cardano.Ledger.Conway.Governance as Shelley
@@ -83,7 +90,7 @@ import qualified Data.Strict.Maybe as Strict
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import GHC.IO.Exception (userError)
-import Lens.Micro ((^.))
+import Lens.Micro ((%~), (^.), (^?))
 import Ouroboros.Consensus.Block (
   CodecConfig,
   Point (..),
@@ -225,9 +232,9 @@ applyBlock env blk = do
     !result <- fromEitherSTM $ tickThenReapplyCheckHash (ExtLedgerCfg (getTopLevelconfigHasLedger env)) blk (clsState oldState)
     let ledgerEventsFull = mapMaybe (convertAuxLedgerEvent (leHasRewards env)) (lrEvents result)
     let (ledgerEvents, deposits) = splitDeposits ledgerEventsFull
-    let !newLedgerState = lrResult result
+    let !newLedgerState = finaliseDrepDistr (lrResult result)
     !details <- getSlotDetails env (ledgerState newLedgerState) time (cardanoBlockSlotNo blk)
-    !newEpoch <- fromEitherSTM $ mkNewEpoch (clsState oldState) newLedgerState (findAdaPots ledgerEvents)
+    !newEpoch <- fromEitherSTM $ mkOnNewEpoch (clsState oldState) newLedgerState (findAdaPots ledgerEvents)
     let !newEpochBlockNo = applyToEpochBlockNo (isJust $ blockIsEBB blk) (isJust newEpoch) (clsEpochBlockNo oldState)
     let !newState = CardanoLedgerState newLedgerState newEpochBlockNo
     let !ledgerDB' = pushLedgerDB ledgerDB newState
@@ -241,37 +248,42 @@ applyBlock env blk = do
                 , apPoolsRegistered = getRegisteredPools oldState
                 , apNewEpoch = maybeToStrict newEpoch
                 , apOldLedger = Strict.Just oldState
+                , apDeposits = maybeToStrict $ Generic.getDeposits newLedgerState
                 , apSlotDetails = details
                 , apStakeSlice = getStakeSlice env newState False
                 , apEvents = ledgerEvents
-                , apEnactState = getEnacted newLedgerState
+                , apGovActionState = getGovState newLedgerState
                 , apDepositsMap = DepositsMap deposits
                 }
             else defaultApplyResult details
     pure (oldState, appResult)
   where
-    mkNewEpoch :: ExtLedgerState CardanoBlock -> ExtLedgerState CardanoBlock -> Maybe AdaPots -> Either SyncNodeError (Maybe Generic.NewEpoch)
-    mkNewEpoch oldState newState mPots = do
-      let currEpochE = ledgerEpochNo env newState
-          prevEpochE = ledgerEpochNo env oldState
+    mkOnNewEpoch :: ExtLedgerState CardanoBlock -> ExtLedgerState CardanoBlock -> Maybe AdaPots -> Either SyncNodeError (Maybe Generic.NewEpoch)
+    mkOnNewEpoch oldState newState mPots = do
       -- pass on error when trying to get ledgerEpochNo
-      case (currEpochE, prevEpochE) of
+      case (prevEpochE, currEpochE) of
         (Left err, _) -> Left err
         (_, Left err) -> Left err
-        (Right currEpoch, Right prevEpoch) -> do
-          if currEpoch /= prevEpoch + 1
-            then Right Nothing
-            else
-              Right $
-                Just $
-                  Generic.NewEpoch
-                    { Generic.neEpoch = currEpoch
-                    , Generic.neIsEBB = isJust $ blockIsEBB blk
-                    , Generic.neAdaPots = maybeToStrict mPots
-                    , Generic.neEpochUpdate = Generic.epochUpdate newState
-                    , Generic.neDRepState = maybeToStrict $ getDrepDistr newState
-                    , Generic.neEnacted = maybeToStrict $ getEnacted newState
-                    }
+        (Right Nothing, Right (Just (EpochNo 0))) -> Right $ Just $ mkNewEpoch (EpochNo 0)
+        (Right (Just prevEpoch), Right (Just currEpoch))
+          | unEpochNo currEpoch == 1 + unEpochNo prevEpoch ->
+              Right $ Just $ mkNewEpoch currEpoch
+        _ -> Right Nothing
+      where
+        prevEpochE = ledgerEpochNo env oldState
+        currEpochE = ledgerEpochNo env newState
+
+        mkNewEpoch :: EpochNo -> Generic.NewEpoch
+        mkNewEpoch currEpoch =
+          Generic.NewEpoch
+            { Generic.neEpoch = currEpoch
+            , Generic.neIsEBB = isJust $ blockIsEBB blk
+            , Generic.neAdaPots = maybeToStrict mPots
+            , Generic.neEpochUpdate = Generic.epochUpdate newState
+            , Generic.neDRepState = maybeToStrict $ getDrepState newState
+            , Generic.neEnacted = maybeToStrict $ getGovState newState
+            , Generic.nePoolDistr = maybeToStrict $ Generic.getPoolDistr newState
+            }
 
     applyToEpochBlockNo :: Bool -> Bool -> EpochBlockNo -> EpochBlockNo
     applyToEpochBlockNo True _ _ = EBBEpochBlockNo
@@ -280,16 +292,17 @@ applyBlock env blk = do
     applyToEpochBlockNo _ _ GenesisEpochBlockNo = EpochBlockNo 0
     applyToEpochBlockNo _ _ EBBEpochBlockNo = EpochBlockNo 0
 
-getDrepDistr :: ExtLedgerState CardanoBlock -> Maybe (DRepPulsingState StandardConway)
-getDrepDistr ls = case ledgerState ls of
-  LedgerStateConway cls ->
-    Just $ Consensus.shelleyLedgerState cls ^. Shelley.newEpochStateDRepPulsingStateL
-  _ -> Nothing
+    getDrepState :: ExtLedgerState CardanoBlock -> Maybe (DRepPulsingState StandardConway)
+    getDrepState ls = ls ^? newEpochStateT . Shelley.newEpochStateDRepPulsingStateL
 
-getEnacted :: ExtLedgerState CardanoBlock -> Maybe (EnactState StandardConway)
-getEnacted ls = case ledgerState ls of
+    finaliseDrepDistr :: ExtLedgerState CardanoBlock -> ExtLedgerState CardanoBlock
+    finaliseDrepDistr ledger =
+      ledger & newEpochStateT %~ forceDRepPulsingState @StandardConway
+
+getGovState :: ExtLedgerState CardanoBlock -> Maybe (ConwayGovState StandardConway)
+getGovState ls = case ledgerState ls of
   LedgerStateConway cls ->
-    Just $ Consensus.shelleyLedgerState cls ^. (Shelley.nesEsL . Shelley.esLStateL . Shelley.lsUTxOStateL . Shelley.utxosGovStateL . cgEnactStateL)
+    Just $ Consensus.shelleyLedgerState cls ^. Shelley.newEpochStateGovStateL
   _ -> Nothing
 
 getStakeSlice :: HasLedgerEnv -> CardanoLedgerState -> Bool -> Generic.StakeSliceRes
@@ -317,12 +330,15 @@ storeSnapshotAndCleanupMaybe ::
   IO Bool
 storeSnapshotAndCleanupMaybe env oldState appResult blkNo isCons syncState =
   case maybeFromStrict (apNewEpoch appResult) of
-    Just newEpoch -> do
-      let newEpochNo = Generic.neEpoch newEpoch
-      -- TODO: Instead of newEpochNo - 1, is there any way to get the epochNo from 'lssOldState'?
-      liftIO $ saveCleanupState env oldState (Just $ newEpochNo - 1)
-      pure True
-    Nothing ->
+    Just newEpoch
+      | newEpochNo <- unEpochNo (Generic.neEpoch newEpoch)
+      , newEpochNo > 0
+      , isCons || (newEpochNo `mod` 10 == 0) || newEpochNo >= 503 ->
+          do
+            -- TODO: Instead of newEpochNo - 1, is there any way to get the epochNo from 'lssOldState'?
+            liftIO $ saveCleanupState env oldState (Just $ EpochNo $ newEpochNo - 1)
+            pure True
+    _ ->
       if timeToSnapshot syncState blkNo && isCons
         then do
           liftIO $ saveCleanupState env oldState Nothing
@@ -742,14 +758,14 @@ getRegisteredPoolShelley lState =
             Shelley.nesEs $
               Consensus.shelleyLedgerState lState
 
-ledgerEpochNo :: HasLedgerEnv -> ExtLedgerState CardanoBlock -> Either SyncNodeError EpochNo
+ledgerEpochNo :: HasLedgerEnv -> ExtLedgerState CardanoBlock -> Either SyncNodeError (Maybe EpochNo)
 ledgerEpochNo env cls =
   case ledgerTipSlot (ledgerState cls) of
-    Origin -> Right 0 -- An empty chain is in epoch 0
+    Origin -> Right Nothing
     NotOrigin slot ->
       case runExcept $ epochInfoEpoch epochInfo slot of
         Left err -> Left $ SNErrLedgerState $ "unable to use slot: " <> show slot <> "to get ledgerEpochNo: " <> show err
-        Right en -> Right en
+        Right en -> Right (Just en)
   where
     epochInfo :: EpochInfo (Except Consensus.PastHorizonException)
     epochInfo = epochInfoLedger (configLedger $ getTopLevelconfigHasLedger env) (hardForkLedgerStatePerEra $ ledgerState cls)
@@ -843,3 +859,35 @@ findAdaPots = go
     go [] = Nothing
     go (LedgerAdaPots p : _) = Just p
     go (_ : rest) = go rest
+
+-- | Given an committee action id and the current GovState, return the proposed committee.
+-- If it's not a Committee action or is not included in the proposals, return Nothing.
+findProposedCommittee :: GovActionId StandardCrypto -> ConwayGovState StandardConway -> Either Text (Maybe (Committee StandardConway))
+findProposedCommittee gaId cgs = do
+  (rootCommittee, updateList) <- findRoot gaId
+  computeCommittee rootCommittee updateList
+  where
+    ps = cgsProposals cgs
+    findRoot = findRootRecursively []
+
+    findRootRecursively :: [GovAction StandardConway] -> GovActionId StandardCrypto -> Either Text (StrictMaybe (Committee StandardConway), [GovAction StandardConway])
+    findRootRecursively acc gid = do
+      gas <- fromNothing ("Didn't find proposal " <> textShow gid) $ proposalsLookupId gid ps
+      let ga = pProcGovAction (gasProposalProcedure gas)
+      case ga of
+        NoConfidence _ -> Right (Ledger.SNothing, acc)
+        UpdateCommittee Ledger.SNothing _ _ _ -> Right (cgsCommittee cgs, ga : acc)
+        UpdateCommittee gpid _ _ _
+          | gpid == ps ^. pRootsL . grCommitteeL . prRootL ->
+              Right (cgsCommittee cgs, ga : acc)
+        UpdateCommittee (Ledger.SJust gpid) _ _ _ -> findRootRecursively (ga : acc) (unGovPurposeId gpid)
+        _ -> Left "Found invalid gov action referenced by committee"
+
+    computeCommittee :: StrictMaybe (Committee StandardConway) -> [GovAction StandardConway] -> Either Text (Maybe (Committee StandardConway))
+    computeCommittee sCommittee actions =
+      Ledger.strictMaybeToMaybe <$> foldM applyCommitteeUpdate sCommittee actions
+
+    applyCommitteeUpdate scommittee = \case
+      UpdateCommittee _ toRemove toAdd q -> Right $ Ledger.SJust $ updatedCommittee toRemove toAdd q scommittee
+      _ -> Left "Unexpected gov action." -- Should never happen since the accumulator only includes UpdateCommittee
+    fromNothing err = maybe (Left err) Right

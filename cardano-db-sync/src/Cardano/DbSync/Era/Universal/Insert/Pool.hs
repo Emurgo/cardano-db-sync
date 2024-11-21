@@ -26,9 +26,8 @@ import Cardano.DbSync.Cache (
   queryOrInsertStakeAddress,
   queryPoolKeyOrInsert,
  )
-import Cardano.DbSync.Cache.Types (Cache (..), CacheNew (..))
+import Cardano.DbSync.Cache.Types (CacheAction (..), CacheStatus (..))
 import qualified Cardano.DbSync.Era.Shelley.Generic as Generic
-import Cardano.DbSync.Era.Shelley.Query
 import Cardano.DbSync.Error
 import Cardano.DbSync.Types (PoolKeyHash)
 import Cardano.DbSync.Util
@@ -50,8 +49,9 @@ type IsPoolMember = PoolKeyHash -> Bool
 insertPoolRegister ::
   (MonadBaseControl IO m, MonadIO m) =>
   Trace IO Text ->
-  Cache ->
+  CacheStatus ->
   IsPoolMember ->
+  Maybe Generic.Deposits ->
   Ledger.Network ->
   EpochNo ->
   DB.BlockId ->
@@ -59,15 +59,17 @@ insertPoolRegister ::
   Word16 ->
   PoolP.PoolParams StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertPoolRegister _tracer cache isMember network (EpochNo epoch) blkId txId idx params = do
-  poolHashId <- lift $ insertPoolKeyWithCache cache CacheNew (PoolP.ppId params)
+insertPoolRegister trce cache isMember mdeposits network (EpochNo epoch) blkId txId idx params = do
+  poolHashId <- lift $ insertPoolKeyWithCache cache UpdateCache (PoolP.ppId params)
   mdId <- case strictMaybeToMaybe $ PoolP.ppMetadata params of
     Just md -> Just <$> insertPoolMetaDataRef poolHashId txId md
     Nothing -> pure Nothing
 
-  epochActivationDelay <- mkEpochActivationDelay poolHashId
+  isRegistration <- isPoolRegistration poolHashId
+  let epochActivationDelay = if isRegistration then 2 else 3
+      deposit = if isRegistration then Generic.coinToDbLovelace . Generic.poolDeposit <$> mdeposits else Nothing
 
-  saId <- lift $ queryOrInsertRewardAccount cache CacheNew (adjustNetworkTag $ PoolP.ppRewardAcnt params)
+  saId <- lift $ queryOrInsertRewardAccount trce cache UpdateCache (adjustNetworkTag $ PoolP.ppRewardAccount params)
   poolUpdateId <-
     lift
       . DB.insertPoolUpdate
@@ -81,39 +83,40 @@ insertPoolRegister _tracer cache isMember network (EpochNo epoch) blkId txId idx
         , DB.poolUpdateMetaId = mdId
         , DB.poolUpdateMargin = realToFrac $ Ledger.unboundRational (PoolP.ppMargin params)
         , DB.poolUpdateFixedCost = Generic.coinToDbLovelace (PoolP.ppCost params)
+        , DB.poolUpdateDeposit = deposit
         , DB.poolUpdateRegisteredTxId = txId
         }
 
-  mapM_ (insertPoolOwner cache network poolUpdateId) $ toList (PoolP.ppOwners params)
+  mapM_ (insertPoolOwner trce cache network poolUpdateId) $ toList (PoolP.ppOwners params)
   mapM_ (insertPoolRelay poolUpdateId) $ toList (PoolP.ppRelays params)
   where
-    mkEpochActivationDelay :: MonadIO m => DB.PoolHashId -> ExceptT SyncNodeError (ReaderT SqlBackend m) Word64
-    mkEpochActivationDelay poolHashId =
+    isPoolRegistration :: MonadIO m => DB.PoolHashId -> ExceptT SyncNodeError (ReaderT SqlBackend m) Bool
+    isPoolRegistration poolHashId =
       if isMember (PoolP.ppId params)
-        then pure 3
+        then pure False
         else do
           -- if the pool is not registered at the end of the previous block, check for
           -- other registrations at the current block. If this is the first registration
           -- then it's +2, else it's +3.
-          otherUpdates <- lift $ queryPoolUpdateByBlock blkId poolHashId
-          pure $ if otherUpdates then 3 else 2
+          otherUpdates <- lift $ DB.queryPoolUpdateByBlock blkId poolHashId
+          pure $ not otherUpdates
 
-    -- Ignore the network in the `RewardAcnt` and use the provided one instead.
+    -- Ignore the network in the `RewardAccount` and use the provided one instead.
     -- This is a workaround for https://github.com/IntersectMBO/cardano-db-sync/issues/546
-    adjustNetworkTag :: Ledger.RewardAcnt StandardCrypto -> Ledger.RewardAcnt StandardCrypto
-    adjustNetworkTag (Shelley.RewardAcnt _ cred) = Shelley.RewardAcnt network cred
+    adjustNetworkTag :: Ledger.RewardAccount StandardCrypto -> Ledger.RewardAccount StandardCrypto
+    adjustNetworkTag (Shelley.RewardAccount _ cred) = Shelley.RewardAccount network cred
 
 insertPoolRetire ::
   (MonadBaseControl IO m, MonadIO m) =>
   Trace IO Text ->
   DB.TxId ->
-  Cache ->
+  CacheStatus ->
   EpochNo ->
   Word16 ->
   Ledger.KeyHash 'Ledger.StakePool StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
 insertPoolRetire trce txId cache epochNum idx keyHash = do
-  poolId <- lift $ queryPoolKeyOrInsert "insertPoolRetire" trce cache CacheNew True keyHash
+  poolId <- lift $ queryPoolKeyOrInsert "insertPoolRetire" trce cache UpdateCache True keyHash
   void . lift . DB.insertPoolRetire $
     DB.PoolRetire
       { DB.poolRetireHashId = poolId
@@ -140,13 +143,14 @@ insertPoolMetaDataRef poolId txId md =
 
 insertPoolOwner ::
   (MonadBaseControl IO m, MonadIO m) =>
-  Cache ->
+  Trace IO Text ->
+  CacheStatus ->
   Ledger.Network ->
   DB.PoolUpdateId ->
   Ledger.KeyHash 'Ledger.Staking StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertPoolOwner cache network poolUpdateId skh = do
-  saId <- lift $ queryOrInsertStakeAddress cache CacheNew network (Ledger.KeyHashObj skh)
+insertPoolOwner trce cache network poolUpdateId skh = do
+  saId <- lift $ queryOrInsertStakeAddress trce cache UpdateCacheStrong network (Ledger.KeyHashObj skh)
   void . lift . DB.insertPoolOwner $
     DB.PoolOwner
       { DB.poolOwnerAddrId = saId
@@ -194,8 +198,9 @@ insertPoolRelay updateId relay =
 insertPoolCert ::
   (MonadBaseControl IO m, MonadIO m) =>
   Trace IO Text ->
-  Cache ->
+  CacheStatus ->
   IsPoolMember ->
+  Maybe Generic.Deposits ->
   Ledger.Network ->
   EpochNo ->
   DB.BlockId ->
@@ -203,7 +208,7 @@ insertPoolCert ::
   Word16 ->
   PoolCert StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertPoolCert tracer cache isMember network epoch blkId txId idx pCert =
+insertPoolCert tracer cache isMember mdeposits network epoch blkId txId idx pCert =
   case pCert of
-    RegPool pParams -> insertPoolRegister tracer cache isMember network epoch blkId txId idx pParams
+    RegPool pParams -> insertPoolRegister tracer cache isMember mdeposits network epoch blkId txId idx pParams
     RetirePool keyHash epochNum -> insertPoolRetire tracer txId cache epochNum idx keyHash

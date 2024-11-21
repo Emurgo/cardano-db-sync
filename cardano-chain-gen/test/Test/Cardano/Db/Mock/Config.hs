@@ -17,9 +17,24 @@ module Test.Cardano.Db.Mock.Config (
   fingerprintRoot,
   getDBSyncPGPass,
   getPoolLayer,
+
+  -- * Configs
   mkConfig,
   mkSyncNodeConfig,
   mkConfigDir,
+  configPruneForceTxIn,
+  configPrune,
+  configConsume,
+  configBootstrap,
+  configPlutusDisable,
+  configMultiAssetsDisable,
+  configShelleyDisable,
+  configRemoveJsonFromSchema,
+  configRemoveJsonFromSchemaFalse,
+  configLedgerIgnore,
+  configMetadataEnable,
+  configMetadataDisable,
+  configMetadataKeys,
   mkFingerPrint,
   mkMutableDir,
   mkDBSyncEnv,
@@ -37,25 +52,28 @@ module Test.Cardano.Db.Mock.Config (
   withFullConfig,
   withFullConfigAndDropDB,
   withFullConfigAndLogs,
+  withCustomConfigAndLogsAndDropDB,
   withCustomConfig,
   withCustomConfigAndDropDB,
   withCustomConfigAndLogs,
   withFullConfig',
   replaceConfigFile,
+  txOutTableTypeFromConfig,
 ) where
 
 import Cardano.Api (NetworkMagic (..))
-import qualified Cardano.Db as Db
+import qualified Cardano.Db as DB
 import Cardano.DbSync
 import Cardano.DbSync.Config
 import Cardano.DbSync.Config.Cardano
+import Cardano.DbSync.Config.Types
 import Cardano.DbSync.Error (runOrThrowIO)
 import Cardano.DbSync.Types (CardanoBlock, MetricSetters (..))
 import Cardano.Mock.ChainSync.Server
 import Cardano.Mock.Forging.Interpreter
 import Cardano.Node.Protocol.Shelley (readLeaderCredentials)
 import Cardano.Node.Types (ProtocolFilepaths (..))
-import Cardano.Prelude (ReaderT, panic, stderr)
+import Cardano.Prelude (NonEmpty ((:|)), ReaderT, panic, stderr, textShow)
 import Cardano.SMASH.Server.PoolDataLayer
 import Control.Concurrent.Async (Async, async, cancel, poll)
 import Control.Concurrent.STM (atomically)
@@ -73,7 +91,6 @@ import Control.Monad.Logger (NoLoggingT, runNoLoggingT)
 import Control.Monad.Trans.Except.Extra (runExceptT)
 import Control.Tracer (nullTracer)
 import Data.Text (Text)
-import qualified Data.Text as Text
 import Database.Persist.Postgresql (createPostgresqlPool)
 import Database.Persist.Sql (SqlBackend)
 import Ouroboros.Consensus.Block.Forging
@@ -116,7 +133,6 @@ data CommandLineArgs = CommandLineArgs
   , claFullMode :: Bool
   , claMigrateConsumed :: Bool
   , claPruneTxOut :: Bool
-  , claBootstrap :: Bool
   }
 
 data WithConfigArgs = WithConfigArgs
@@ -209,16 +225,16 @@ pollDBSync env = do
 withDBSyncEnv :: IO DBSyncEnv -> (DBSyncEnv -> IO a) -> IO a
 withDBSyncEnv mkEnv = bracket mkEnv stopDBSyncIfRunning
 
-getDBSyncPGPass :: DBSyncEnv -> Db.PGPassSource
+getDBSyncPGPass :: DBSyncEnv -> DB.PGPassSource
 getDBSyncPGPass = enpPGPassSource . dbSyncParams
 
 queryDBSync :: DBSyncEnv -> ReaderT SqlBackend (NoLoggingT IO) a -> IO a
-queryDBSync env = Db.runWithConnectionNoLogging (getDBSyncPGPass env)
+queryDBSync env = DB.runWithConnectionNoLogging (getDBSyncPGPass env)
 
 getPoolLayer :: DBSyncEnv -> IO PoolDataLayer
 getPoolLayer env = do
-  pgconfig <- runOrThrowIO $ Db.readPGPass (enpPGPassSource $ dbSyncParams env)
-  pool <- runNoLoggingT $ createPostgresqlPool (Db.toConnectionString pgconfig) 1 -- Pool size of 1 for tests
+  pgconfig <- runOrThrowIO $ DB.readPGPass (enpPGPassSource $ dbSyncParams env)
+  pool <- runNoLoggingT $ createPostgresqlPool (DB.toConnectionString pgconfig) 1 -- Pool size of 1 for tests
   pure $
     postgresqlPoolDataLayer
       nullTracer
@@ -259,7 +275,7 @@ mkShelleyCredentials bulkFile = do
 -- | staticDir can be shared by tests running in parallel. mutableDir not.
 mkSyncNodeParams :: FilePath -> FilePath -> CommandLineArgs -> IO SyncNodeParams
 mkSyncNodeParams staticDir mutableDir CommandLineArgs {..} = do
-  pgconfig <- runOrThrowIO Db.readPGPassDefault
+  pgconfig <- runOrThrowIO DB.readPGPassDefault
 
   pure $
     SyncNodeParams
@@ -267,7 +283,7 @@ mkSyncNodeParams staticDir mutableDir CommandLineArgs {..} = do
       , enpSocketPath = SocketPath $ mutableDir </> ".socket"
       , enpMaybeLedgerStateDir = Just $ LedgerStateDir $ mutableDir </> "ledger-states"
       , enpMigrationDir = MigrationDir "../schema"
-      , enpPGPassSource = Db.PGPassCached pgconfig
+      , enpPGPassSource = DB.PGPassCached pgconfig
       , enpEpochDisabled = claEpochDisabled
       , enpHasCache = claHasCache
       , enpSkipFix = claSkipFix
@@ -279,9 +295,64 @@ mkSyncNodeParams staticDir mutableDir CommandLineArgs {..} = do
       , enpMaybeRollback = Nothing
       }
 
+------------------------------------------------------------------------------
+-- Custom Configs
+------------------------------------------------------------------------------
 mkConfigFile :: FilePath -> FilePath -> ConfigFile
 mkConfigFile staticDir cliConfigFilename =
   ConfigFile $ staticDir </> cliConfigFilename
+
+configPruneForceTxIn :: Bool -> SyncNodeConfig -> SyncNodeConfig
+configPruneForceTxIn useTxOutAddress cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioTxOut = TxOutConsumedPrune (ForceTxIn True) (UseTxOutAddress useTxOutAddress)}}
+
+configPrune :: Bool -> SyncNodeConfig -> SyncNodeConfig
+configPrune useTxOutAddress cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioTxOut = TxOutConsumedPrune (ForceTxIn False) (UseTxOutAddress useTxOutAddress)}}
+
+configConsume :: Bool -> SyncNodeConfig -> SyncNodeConfig
+configConsume useTxOutAddress cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioTxOut = TxOutConsumed (ForceTxIn False) (UseTxOutAddress useTxOutAddress)}}
+
+configBootstrap :: Bool -> SyncNodeConfig -> SyncNodeConfig
+configBootstrap useTxOutAddress cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioTxOut = TxOutConsumedBootstrap (ForceTxIn False) (UseTxOutAddress useTxOutAddress)}}
+
+configPlutusDisable :: SyncNodeConfig -> SyncNodeConfig
+configPlutusDisable cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioPlutus = PlutusDisable}}
+
+configMultiAssetsDisable :: SyncNodeConfig -> SyncNodeConfig
+configMultiAssetsDisable cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioMultiAsset = MultiAssetDisable}}
+
+configShelleyDisable :: SyncNodeConfig -> SyncNodeConfig
+configShelleyDisable cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioShelley = ShelleyDisable}}
+
+configRemoveJsonFromSchema :: SyncNodeConfig -> SyncNodeConfig
+configRemoveJsonFromSchema cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioRemoveJsonbFromSchema = RemoveJsonbFromSchemaConfig True}}
+
+configRemoveJsonFromSchemaFalse :: SyncNodeConfig -> SyncNodeConfig
+configRemoveJsonFromSchemaFalse cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioRemoveJsonbFromSchema = RemoveJsonbFromSchemaConfig False}}
+
+configLedgerIgnore :: SyncNodeConfig -> SyncNodeConfig
+configLedgerIgnore cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioLedger = LedgerIgnore}}
+
+configMetadataEnable :: SyncNodeConfig -> SyncNodeConfig
+configMetadataEnable cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioMetadata = MetadataEnable}}
+
+configMetadataDisable :: SyncNodeConfig -> SyncNodeConfig
+configMetadataDisable cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioMetadata = MetadataDisable}}
+
+configMetadataKeys :: SyncNodeConfig -> SyncNodeConfig
+configMetadataKeys cfg = do
+  cfg {dncInsertOptions = (dncInsertOptions cfg) {sioMetadata = MetadataKeys $ 1 :| []}}
 
 initCommandLineArgs :: CommandLineArgs
 initCommandLineArgs =
@@ -301,7 +372,6 @@ initCommandLineArgs =
     , claFullMode = True
     , claMigrateConsumed = False
     , claPruneTxOut = False
-    , claBootstrap = False
     }
 
 emptyMetricsSetters :: MetricSetters
@@ -377,7 +447,7 @@ withFullConfigAndLogs =
 withCustomConfig ::
   CommandLineArgs ->
   -- | custom SyncNodeConfig
-  Maybe SyncNodeConfig ->
+  Maybe (SyncNodeConfig -> SyncNodeConfig) ->
   -- | config filepath
   FilePath ->
   -- | test label
@@ -398,7 +468,7 @@ withCustomConfig =
 withCustomConfigAndDropDB ::
   CommandLineArgs ->
   -- | custom SyncNodeConfig
-  Maybe SyncNodeConfig ->
+  Maybe (SyncNodeConfig -> SyncNodeConfig) ->
   -- | config filepath
   FilePath ->
   -- | test label
@@ -420,7 +490,7 @@ withCustomConfigAndDropDB =
 withCustomConfigAndLogs ::
   CommandLineArgs ->
   -- | custom SyncNodeConfig
-  Maybe SyncNodeConfig ->
+  Maybe (SyncNodeConfig -> SyncNodeConfig) ->
   -- | config filepath
   FilePath ->
   -- | test label
@@ -438,11 +508,32 @@ withCustomConfigAndLogs =
         }
     )
 
+withCustomConfigAndLogsAndDropDB ::
+  CommandLineArgs ->
+  -- | custom SyncNodeConfig
+  Maybe (SyncNodeConfig -> SyncNodeConfig) ->
+  -- | config filepath
+  FilePath ->
+  -- | test label
+  FilePath ->
+  (Interpreter -> ServerHandle IO CardanoBlock -> DBSyncEnv -> IO a) ->
+  IOManager ->
+  [(Text, Text)] ->
+  IO a
+withCustomConfigAndLogsAndDropDB =
+  withFullConfig'
+    ( WithConfigArgs
+        { hasFingerprint = True
+        , shouldLog = True
+        , shouldDropDB = True
+        }
+    )
+
 withFullConfig' ::
   WithConfigArgs ->
   CommandLineArgs ->
   -- | custom SyncNodeConfig
-  Maybe SyncNodeConfig ->
+  Maybe (SyncNodeConfig -> SyncNodeConfig) ->
   -- | config filepath
   FilePath ->
   -- | test label
@@ -456,7 +547,9 @@ withFullConfig' WithConfigArgs {..} cmdLineArgs mSyncNodeConfig configFilePath t
   -- check if custom syncNodeConfigs have been passed or not
   syncNodeConfig <-
     case mSyncNodeConfig of
-      Just snc -> pure snc
+      Just updateFn -> do
+        initConfigFile <- mkSyncNodeConfig configFilePath cmdLineArgs
+        pure $ updateFn initConfigFile
       Nothing -> mkSyncNodeConfig configFilePath cmdLineArgs
 
   cfg <- mkConfig configFilePath mutableDir cmdLineArgs syncNodeConfig
@@ -482,12 +575,12 @@ withFullConfig' WithConfigArgs {..} cmdLineArgs mSyncNodeConfig configFilePath t
         -- we dont fork dbsync here. Just prepare it as an action
         withDBSyncEnv (mkDBSyncEnv dbsyncParams syncNodeConfig partialDbSyncRun) $ \dbSyncEnv -> do
           let pgPass = getDBSyncPGPass dbSyncEnv
-          tableNames <- Db.getAllTablleNames pgPass
+          tableNames <- DB.getAllTablleNames pgPass
           -- We only want to create the table schema once for the tests so here we check
           -- if there are any table names.
           if null tableNames || shouldDropDB
-            then void . hSilence [stderr] $ Db.recreateDB pgPass
-            else void . hSilence [stderr] $ Db.truncateTables pgPass tableNames
+            then void . hSilence [stderr] $ DB.recreateDB pgPass
+            else void . hSilence [stderr] $ DB.truncateTables pgPass tableNames
           action interpreter mockServer dbSyncEnv
   where
     mutableDir = mkMutableDir testLabelFilePath
@@ -504,9 +597,6 @@ recreateDir path = do
   removePathForcibly path
   createDirectoryIfMissing True path
 
-textShow :: (Show a) => a -> Text
-textShow = Text.pack . show
-
 replaceConfigFile :: FilePath -> DBSyncEnv -> IO DBSyncEnv
 replaceConfigFile newFilename dbSync@DBSyncEnv {..} = do
   cfg <- readSyncNodeConfig $ mkConfigFile configDir newFilename
@@ -516,3 +606,15 @@ replaceConfigFile newFilename dbSync@DBSyncEnv {..} = do
     configDir = mkConfigDir . takeDirectory . unConfigFile . enpConfigFile $ dbSyncParams
     newParams =
       dbSyncParams {enpConfigFile = ConfigFile $ configDir </> newFilename}
+
+txOutTableTypeFromConfig :: DBSyncEnv -> DB.TxOutTableType
+txOutTableTypeFromConfig dbSyncEnv =
+  case sioTxOut $ dncInsertOptions $ dbSyncConfig dbSyncEnv of
+    TxOutDisable -> DB.TxOutCore
+    TxOutEnable useTxOutAddress -> getTxOutTT useTxOutAddress
+    TxOutConsumed _ useTxOutAddress -> getTxOutTT useTxOutAddress
+    TxOutConsumedPrune _ useTxOutAddress -> getTxOutTT useTxOutAddress
+    TxOutConsumedBootstrap _ useTxOutAddress -> getTxOutTT useTxOutAddress
+  where
+    getTxOutTT :: UseTxOutAddress -> DB.TxOutTableType
+    getTxOutTT value = if unUseTxOutAddress value then DB.TxOutVariantAddress else DB.TxOutCore

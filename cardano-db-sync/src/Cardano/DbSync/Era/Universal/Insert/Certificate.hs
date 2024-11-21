@@ -9,8 +9,6 @@
 
 module Cardano.DbSync.Era.Universal.Insert.Certificate (
   insertCertificate,
-  insertDelegCert,
-  insertConwayDelegCert,
   insertMirCert,
   insertDrepRegistration,
   insertDrepDeRegistration,
@@ -29,11 +27,11 @@ import qualified Cardano.Db as DB
 import Cardano.DbSync.Api
 import Cardano.DbSync.Api.Types (InsertOptions (..), SyncEnv (..))
 import Cardano.DbSync.Cache (
-  insertStakeAddress,
+  queryOrInsertRewardAccount,
   queryOrInsertStakeAddress,
   queryPoolKeyOrInsert,
  )
-import Cardano.DbSync.Cache.Types (Cache (..), CacheNew (..))
+import Cardano.DbSync.Cache.Types (CacheAction (..), CacheStatus (..))
 import qualified Cardano.DbSync.Era.Shelley.Generic as Generic
 import Cardano.DbSync.Era.Universal.Insert.GovAction (insertCommitteeHash, insertCredDrepHash, insertDrep, insertVotingAnchor)
 import Cardano.DbSync.Era.Universal.Insert.Pool (IsPoolMember, insertPoolCert)
@@ -42,11 +40,11 @@ import Cardano.DbSync.Types
 import Cardano.DbSync.Util
 import Cardano.Ledger.BaseTypes
 import qualified Cardano.Ledger.BaseTypes as Ledger
+import Cardano.Ledger.CertState
 import Cardano.Ledger.Coin (Coin (..))
 import qualified Cardano.Ledger.Coin as Ledger
 import Cardano.Ledger.Conway.TxCert
 import qualified Cardano.Ledger.Credential as Ledger
-import Cardano.Ledger.DRep (DRep)
 import Cardano.Ledger.Keys
 import qualified Cardano.Ledger.Keys as Ledger
 import qualified Cardano.Ledger.Shelley.AdaPots as Shelley
@@ -63,6 +61,7 @@ insertCertificate ::
   (MonadBaseControl IO m, MonadIO m) =>
   SyncEnv ->
   IsPoolMember ->
+  Maybe Generic.Deposits ->
   DB.BlockId ->
   DB.TxId ->
   EpochNo ->
@@ -70,12 +69,12 @@ insertCertificate ::
   Map Word64 DB.RedeemerId ->
   Generic.TxCertificate ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertCertificate syncEnv isMember blkId txId epochNo slotNo redeemers (Generic.TxCertificate ridx idx cert) =
+insertCertificate syncEnv isMember mDeposits blkId txId epochNo slotNo redeemers (Generic.TxCertificate ridx idx cert) =
   case cert of
     Left (ShelleyTxCertDelegCert deleg) ->
-      when (ioShelley iopts) $ insertDelegCert tracer cache network txId idx mRedeemerId epochNo slotNo deleg
+      when (ioShelley iopts) $ insertDelegCert tracer cache mDeposits network txId idx mRedeemerId epochNo slotNo deleg
     Left (ShelleyTxCertPool pool) ->
-      when (ioShelley iopts) $ insertPoolCert tracer cache isMember network epochNo blkId txId idx pool
+      when (ioShelley iopts) $ insertPoolCert tracer cache isMember mDeposits network epochNo blkId txId idx pool
     Left (ShelleyTxCertMir mir) ->
       when (ioShelley iopts) $ insertMirCert tracer cache network txId idx mir
     Left (ShelleyTxCertGenesisDeleg _gen) ->
@@ -83,21 +82,21 @@ insertCertificate syncEnv isMember blkId txId epochNo slotNo redeemers (Generic.
         liftIO $
           logWarning tracer "insertCertificate: Unhandled DCertGenesis certificate"
     Right (ConwayTxCertDeleg deleg) ->
-      insertConwayDelegCert syncEnv txId idx mRedeemerId epochNo slotNo deleg
+      insertConwayDelegCert syncEnv mDeposits txId idx mRedeemerId epochNo slotNo deleg
     Right (ConwayTxCertPool pool) ->
-      when (ioShelley iopts) $ insertPoolCert tracer cache isMember network epochNo blkId txId idx pool
+      when (ioShelley iopts) $ insertPoolCert tracer cache isMember mDeposits network epochNo blkId txId idx pool
     Right (ConwayTxCertGov c) ->
       when (ioGov iopts) $ case c of
         ConwayRegDRep cred coin anchor ->
-          lift $ insertDrepRegistration txId idx cred (Just coin) (strictMaybeToMaybe anchor)
+          lift $ insertDrepRegistration blkId txId idx cred (Just coin) (strictMaybeToMaybe anchor)
         ConwayUnRegDRep cred coin ->
           lift $ insertDrepDeRegistration txId idx cred coin
         ConwayAuthCommitteeHotKey khCold khHot ->
           lift $ insertCommitteeRegistration txId idx khCold khHot
         ConwayResignCommitteeColdKey khCold anchor ->
-          lift $ insertCommitteeDeRegistration txId idx khCold (strictMaybeToMaybe anchor)
+          lift $ insertCommitteeDeRegistration blkId txId idx khCold (strictMaybeToMaybe anchor)
         ConwayUpdateDRep cred anchor ->
-          lift $ insertDrepRegistration txId idx cred Nothing (strictMaybeToMaybe anchor)
+          lift $ insertDrepRegistration blkId txId idx cred Nothing (strictMaybeToMaybe anchor)
   where
     tracer = getTrace syncEnv
     cache = envCache syncEnv
@@ -108,7 +107,8 @@ insertCertificate syncEnv isMember blkId txId epochNo slotNo redeemers (Generic.
 insertDelegCert ::
   (MonadBaseControl IO m, MonadIO m) =>
   Trace IO Text ->
-  Cache ->
+  CacheStatus ->
+  Maybe Generic.Deposits ->
   Ledger.Network ->
   DB.TxId ->
   Word16 ->
@@ -117,15 +117,16 @@ insertDelegCert ::
   SlotNo ->
   ShelleyDelegCert StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertDelegCert tracer cache network txId idx mRedeemerId epochNo slotNo dCert =
+insertDelegCert tracer cache mDeposits network txId idx mRedeemerId epochNo slotNo dCert =
   case dCert of
-    ShelleyRegCert cred -> insertStakeRegistration epochNo txId idx $ Generic.annotateStakingCred network cred
-    ShelleyUnRegCert cred -> insertStakeDeregistration cache network epochNo txId idx mRedeemerId cred
+    ShelleyRegCert cred -> insertStakeRegistration tracer cache epochNo mDeposits txId idx $ Generic.annotateStakingCred network cred
+    ShelleyUnRegCert cred -> insertStakeDeregistration tracer cache network epochNo txId idx mRedeemerId cred
     ShelleyDelegCert cred poolkh -> insertDelegation tracer cache network epochNo slotNo txId idx mRedeemerId cred poolkh
 
 insertConwayDelegCert ::
   (MonadBaseControl IO m, MonadIO m) =>
   SyncEnv ->
+  Maybe Generic.Deposits ->
   DB.TxId ->
   Word16 ->
   Maybe DB.RedeemerId ->
@@ -133,19 +134,19 @@ insertConwayDelegCert ::
   SlotNo ->
   ConwayDelegCert StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertConwayDelegCert syncEnv txId idx mRedeemerId epochNo slotNo dCert =
+insertConwayDelegCert syncEnv mDeposits txId idx mRedeemerId epochNo slotNo dCert =
   case dCert of
     ConwayRegCert cred _dep ->
       when (ioShelley iopts) $
-        insertStakeRegistration epochNo txId idx $
+        insertStakeRegistration trce cache epochNo mDeposits txId idx $
           Generic.annotateStakingCred network cred
     ConwayUnRegCert cred _dep ->
       when (ioShelley iopts) $
-        insertStakeDeregistration cache network epochNo txId idx mRedeemerId cred
+        insertStakeDeregistration trce cache network epochNo txId idx mRedeemerId cred
     ConwayDelegCert cred delegatee -> insertDeleg cred delegatee
     ConwayRegDelegCert cred delegatee _dep -> do
       when (ioShelley iopts) $
-        insertStakeRegistration epochNo txId idx $
+        insertStakeRegistration trce cache epochNo mDeposits txId idx $
           Generic.annotateStakingCred network cred
       insertDeleg cred delegatee
   where
@@ -155,12 +156,12 @@ insertConwayDelegCert syncEnv txId idx mRedeemerId epochNo slotNo dCert =
           insertDelegation trce cache network epochNo slotNo txId idx mRedeemerId cred poolkh
       DelegVote drep ->
         when (ioGov iopts) $
-          insertDelegationVote cache network txId idx cred drep
+          insertDelegationVote trce cache network txId idx cred drep
       DelegStakeVote poolkh drep -> do
         when (ioShelley iopts) $
           insertDelegation trce cache network epochNo slotNo txId idx mRedeemerId cred poolkh
         when (ioGov iopts) $
-          insertDelegationVote cache network txId idx cred drep
+          insertDelegationVote trce cache network txId idx cred drep
 
     trce = getTrace syncEnv
     cache = envCache syncEnv
@@ -170,13 +171,13 @@ insertConwayDelegCert syncEnv txId idx mRedeemerId epochNo slotNo dCert =
 insertMirCert ::
   (MonadBaseControl IO m, MonadIO m) =>
   Trace IO Text ->
-  Cache ->
+  CacheStatus ->
   Ledger.Network ->
   DB.TxId ->
   Word16 ->
   MIRCert StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertMirCert _tracer cache network txId idx mcert = do
+insertMirCert tracer cache network txId idx mcert = do
   case mirPot mcert of
     ReservesMIR ->
       case mirRewards mcert of
@@ -192,7 +193,7 @@ insertMirCert _tracer cache network txId idx mcert = do
       (StakeCred, Ledger.DeltaCoin) ->
       ExceptT SyncNodeError (ReaderT SqlBackend m) ()
     insertMirReserves (cred, dcoin) = do
-      addrId <- lift $ queryOrInsertStakeAddress cache CacheNew network cred
+      addrId <- lift $ queryOrInsertStakeAddress tracer cache UpdateCacheStrong network cred
       void . lift . DB.insertReserve $
         DB.Reserve
           { DB.reserveAddrId = addrId
@@ -206,7 +207,7 @@ insertMirCert _tracer cache network txId idx mcert = do
       (StakeCred, Ledger.DeltaCoin) ->
       ExceptT SyncNodeError (ReaderT SqlBackend m) ()
     insertMirTreasury (cred, dcoin) = do
-      addrId <- lift $ queryOrInsertStakeAddress cache CacheNew network cred
+      addrId <- lift $ queryOrInsertStakeAddress tracer cache UpdateCacheStrong network cred
       void . lift . DB.insertTreasury $
         DB.Treasury
           { DB.treasuryAddrId = addrId
@@ -235,15 +236,16 @@ insertMirCert _tracer cache network txId idx mcert = do
 --------------------------------------------------------------------------------------------
 insertDrepRegistration ::
   (MonadBaseControl IO m, MonadIO m) =>
+  DB.BlockId ->
   DB.TxId ->
   Word16 ->
   Ledger.Credential 'DRepRole StandardCrypto ->
   Maybe Coin ->
   Maybe (Anchor StandardCrypto) ->
   ReaderT SqlBackend m ()
-insertDrepRegistration txId idx cred mcoin mAnchor = do
+insertDrepRegistration blkId txId idx cred mcoin mAnchor = do
   drepId <- insertCredDrepHash cred
-  votingAnchorId <- whenMaybe mAnchor $ insertVotingAnchor txId DB.OtherAnchor
+  votingAnchorId <- whenMaybe mAnchor $ insertVotingAnchor blkId DB.DrepAnchor
   void
     . DB.insertDrepRegistration
     $ DB.DrepRegistration
@@ -294,13 +296,14 @@ insertCommitteeRegistration txId idx khCold cred = do
 
 insertCommitteeDeRegistration ::
   (MonadBaseControl IO m, MonadIO m) =>
+  DB.BlockId ->
   DB.TxId ->
   Word16 ->
   Ledger.Credential 'ColdCommitteeRole StandardCrypto ->
   Maybe (Anchor StandardCrypto) ->
   ReaderT SqlBackend m ()
-insertCommitteeDeRegistration txId idx khCold mAnchor = do
-  votingAnchorId <- whenMaybe mAnchor $ insertVotingAnchor txId DB.OtherAnchor
+insertCommitteeDeRegistration blockId txId idx khCold mAnchor = do
+  votingAnchorId <- whenMaybe mAnchor $ insertVotingAnchor blockId DB.CommitteeDeRegAnchor
   khColdId <- insertCommitteeHash khCold
   void
     . DB.insertCommitteeDeRegistration
@@ -313,7 +316,8 @@ insertCommitteeDeRegistration txId idx khCold mAnchor = do
 
 insertStakeDeregistration ::
   (MonadBaseControl IO m, MonadIO m) =>
-  Cache ->
+  Trace IO Text ->
+  CacheStatus ->
   Ledger.Network ->
   EpochNo ->
   DB.TxId ->
@@ -321,8 +325,8 @@ insertStakeDeregistration ::
   Maybe DB.RedeemerId ->
   StakeCred ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertStakeDeregistration cache network epochNo txId idx mRedeemerId cred = do
-  scId <- lift $ queryOrInsertStakeAddress cache EvictAndReturn network cred
+insertStakeDeregistration trce cache network epochNo txId idx mRedeemerId cred = do
+  scId <- lift $ queryOrInsertStakeAddress trce cache EvictAndUpdateCache network cred
   void . lift . DB.insertStakeDeregistration $
     DB.StakeDeregistration
       { DB.stakeDeregistrationAddrId = scId
@@ -334,21 +338,22 @@ insertStakeDeregistration cache network epochNo txId idx mRedeemerId cred = do
 
 insertStakeRegistration ::
   (MonadBaseControl IO m, MonadIO m) =>
+  Trace IO Text ->
+  CacheStatus ->
   EpochNo ->
+  Maybe Generic.Deposits ->
   DB.TxId ->
   Word16 ->
-  Shelley.RewardAcnt StandardCrypto ->
+  Shelley.RewardAccount StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertStakeRegistration epochNo txId idx rewardAccount = do
-  -- We by-pass the cache here It's likely it won't hit.
-  -- We don't store to the cache yet, since there are many addrresses
-  -- which are registered and never used.
-  saId <- lift $ insertStakeAddress rewardAccount Nothing
+insertStakeRegistration tracer cache epochNo mDeposits txId idx rewardAccount = do
+  saId <- lift $ queryOrInsertRewardAccount tracer cache UpdateCache rewardAccount
   void . lift . DB.insertStakeRegistration $
     DB.StakeRegistration
       { DB.stakeRegistrationAddrId = saId
       , DB.stakeRegistrationCertIndex = idx
       , DB.stakeRegistrationEpochNo = unEpochNo epochNo
+      , DB.stakeRegistrationDeposit = Generic.coinToDbLovelace . Generic.stakeKeyDeposit <$> mDeposits
       , DB.stakeRegistrationTxId = txId
       }
 
@@ -382,10 +387,14 @@ mkAdaPots blockId slotNo epochNo pots =
     , DB.adaPotsReserves = Generic.coinToDbLovelace $ Shelley.reservesAdaPot pots
     , DB.adaPotsRewards = Generic.coinToDbLovelace $ Shelley.rewardsAdaPot pots
     , DB.adaPotsUtxo = Generic.coinToDbLovelace $ Shelley.utxoAdaPot pots
-    , DB.adaPotsDeposits = Generic.coinToDbLovelace $ Shelley.depositsAdaPot pots
+    , DB.adaPotsDepositsStake = DB.DbLovelace $ fromIntegral $ unCoin (oblStake oblgs) + unCoin (oblPool oblgs)
+    , DB.adaPotsDepositsDrep = Generic.coinToDbLovelace $ oblDRep oblgs
+    , DB.adaPotsDepositsProposal = Generic.coinToDbLovelace $ oblProposal oblgs
     , DB.adaPotsFees = Generic.coinToDbLovelace $ Shelley.feesAdaPot pots
     , DB.adaPotsBlockId = blockId
     }
+  where
+    oblgs = Shelley.obligationsPot pots
 
 --------------------------------------------------------------------------------------------
 -- Insert Delegation
@@ -393,7 +402,7 @@ mkAdaPots blockId slotNo epochNo pots =
 insertDelegation ::
   (MonadBaseControl IO m, MonadIO m) =>
   Trace IO Text ->
-  Cache ->
+  CacheStatus ->
   Ledger.Network ->
   EpochNo ->
   SlotNo ->
@@ -404,8 +413,8 @@ insertDelegation ::
   Ledger.KeyHash 'Ledger.StakePool StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
 insertDelegation trce cache network (EpochNo epoch) slotNo txId idx mRedeemerId cred poolkh = do
-  addrId <- lift $ queryOrInsertStakeAddress cache CacheNew network cred
-  poolHashId <- lift $ queryPoolKeyOrInsert "insertDelegation" trce cache CacheNew True poolkh
+  addrId <- lift $ queryOrInsertStakeAddress trce cache UpdateCacheStrong network cred
+  poolHashId <- lift $ queryPoolKeyOrInsert "insertDelegation" trce cache UpdateCache True poolkh
   void . lift . DB.insertDelegation $
     DB.Delegation
       { DB.delegationAddrId = addrId
@@ -419,15 +428,16 @@ insertDelegation trce cache network (EpochNo epoch) slotNo txId idx mRedeemerId 
 
 insertDelegationVote ::
   (MonadBaseControl IO m, MonadIO m) =>
-  Cache ->
+  Trace IO Text ->
+  CacheStatus ->
   Ledger.Network ->
   DB.TxId ->
   Word16 ->
   StakeCred ->
   DRep StandardCrypto ->
   ExceptT SyncNodeError (ReaderT SqlBackend m) ()
-insertDelegationVote cache network txId idx cred drep = do
-  addrId <- lift $ queryOrInsertStakeAddress cache CacheNew network cred
+insertDelegationVote trce cache network txId idx cred drep = do
+  addrId <- lift $ queryOrInsertStakeAddress trce cache UpdateCacheStrong network cred
   drepId <- lift $ insertDrep drep
   void
     . lift

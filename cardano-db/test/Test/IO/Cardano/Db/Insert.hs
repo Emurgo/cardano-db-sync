@@ -31,8 +31,8 @@ insertZeroTest =
     deleteAllBlocks
     -- Delete the blocks if they exist.
     slid <- insertSlotLeader testSlotLeader
-    void $ deleteBlock (blockOne slid)
-    void $ deleteBlock (blockZero slid)
+    void $ deleteBlock TxOutCore (blockOne slid)
+    void $ deleteBlock TxOutCore (blockZero slid)
     -- Insert the same block twice. The first should be successful (resulting
     -- in a 'Right') and the second should return the same value in a 'Left'.
     bid0 <- insertBlockChecked (blockZero slid)
@@ -45,7 +45,7 @@ insertFirstTest =
     deleteAllBlocks
     -- Delete the block if it exists.
     slid <- insertSlotLeader testSlotLeader
-    void $ deleteBlock (blockOne slid)
+    void $ deleteBlock TxOutCore (blockOne slid)
     -- Insert the same block twice.
     bid0 <- insertBlockChecked (blockZero slid)
     bid1 <- insertBlockChecked $ (\b -> b {blockPreviousId = Just bid0}) (blockOne slid)
@@ -84,7 +84,7 @@ insertForeignKeyMissing = do
     assertBool (show count0 ++ "/= 1") (count0 == 1)
 
     -- Delete all OffChainFetchErrorTypeCount after pmrid
-    queryFirstAndDeleteAfter OffChainPoolFetchErrorPmrId pmrid
+    queryDelete OffChainPoolFetchErrorPmrId pmrid
     deleteWhere [PoolMetadataRefId >=. pmrid]
     count1 <- offChainPoolFetchErrorCount
     assertBool (show count1 ++ "/= 0") (count1 == 0)
@@ -149,7 +149,9 @@ adaPotsZero bid =
     , adaPotsReserves = DbLovelace 0
     , adaPotsRewards = DbLovelace 0
     , adaPotsUtxo = DbLovelace 0
-    , adaPotsDeposits = DbLovelace 0
+    , adaPotsDepositsStake = DbLovelace 0
+    , adaPotsDepositsDrep = DbLovelace 0
+    , adaPotsDepositsProposal = DbLovelace 0
     , adaPotsFees = DbLovelace 0
     , adaPotsBlockId = bid
     }
@@ -168,6 +170,7 @@ txZero bid =
     , txInvalidHereafter = Nothing
     , txValidContract = True
     , txScriptSize = 0
+    , txTreasuryDonation = DbLovelace 0
     }
 
 poolHash0 :: PoolHash

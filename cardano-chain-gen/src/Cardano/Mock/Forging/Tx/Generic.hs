@@ -24,8 +24,13 @@ module Cardano.Mock.Forging.Tx.Generic (
   unregisteredPools,
   registeredByronGenesisKeys,
   registeredShelleyGenesisKeys,
+  bootstrapCommitteeCreds,
+  unregisteredDRepIds,
   consPoolParams,
   getPoolStakeCreds,
+  resolveStakePoolVoters,
+  drepVoters,
+  committeeVoters,
 ) where
 
 import Cardano.Binary (ToCBOR (..))
@@ -34,6 +39,7 @@ import qualified Cardano.Crypto.Hash as Hash
 import Cardano.Ledger.Address
 import Cardano.Ledger.BaseTypes
 import Cardano.Ledger.Coin (Coin (..))
+import Cardano.Ledger.Conway.Governance (Voter (..))
 import qualified Cardano.Ledger.Core as Core
 import Cardano.Ledger.Credential
 import Cardano.Ledger.Crypto (ADDRHASH)
@@ -49,7 +55,7 @@ import qualified Cardano.Ledger.UMap as UMap
 import Cardano.Mock.Forging.Crypto
 import Cardano.Mock.Forging.Tx.Alonzo.ScriptsExamples
 import Cardano.Mock.Forging.Types
-import Cardano.Prelude hiding (length, (.))
+import Cardano.Prelude hiding (length, map, (.))
 import Data.Coerce (coerce)
 import Data.List (nub)
 import Data.List.Extra ((!?))
@@ -127,7 +133,7 @@ resolveStakeCreds indx st = case indx of
   StakeAddress addr -> Right addr
   StakeIndexNew n -> toEither $ unregisteredStakeCredentials !? n
   StakeIndexScript bl -> Right $ if bl then alwaysSucceedsScriptStake else alwaysFailsScriptStake
-  StakeIndexPoolLeader poolIndex -> Right $ getRwdCred $ ppRewardAcnt $ findPoolParams poolIndex
+  StakeIndexPoolLeader poolIndex -> Right $ raCredential $ ppRewardAccount $ findPoolParams poolIndex
   StakeIndexPoolMember n poolIndex -> Right $ resolvePoolMember n poolIndex
   where
     rewardAccs =
@@ -206,7 +212,7 @@ allPoolStakeCert st =
 
 getPoolStakeCreds :: PoolParams c -> [StakeCredential c]
 getPoolStakeCreds pparams =
-  getRwdCred (ppRewardAcnt pparams)
+  raCredential (ppRewardAccount pparams)
     : (KeyHashObj <$> Set.toList (ppOwners pparams))
 
 unregisteredStakeCredentials :: [StakeCredential StandardCrypto]
@@ -262,6 +268,34 @@ registeredShelleyGenesisKeys =
   , KeyHash "471cc34983f6a2fd7b4018e3147532185d69a448d6570d46019e58e6"
   ]
 
+bootstrapCommitteeCreds ::
+  [ ( Credential 'ColdCommitteeRole StandardCrypto
+    , Credential 'HotCommitteeRole StandardCrypto
+    )
+  ]
+bootstrapCommitteeCreds =
+  [
+    ( ScriptHashObj $ ScriptHash "2c698e41831684b16477fb50082b0c0e396d436504e39037d5366582"
+    , KeyHashObj $ KeyHash "583a4c8d5f9b3769f98135a2cc041a3118586bd5c74ca72e808af73b"
+    )
+  ,
+    ( ScriptHashObj $ ScriptHash "8fc13431159fdda66347a38c55105d50d77d67abc1c368b876d52ad1"
+    , KeyHashObj $ KeyHash "39c898a713b67e7e0ed2345753db246f0d812669445488943a9f851e"
+    )
+  ,
+    ( ScriptHashObj $ ScriptHash "921e1ccb4812c4280510c9ccab81c561f3d413e7d744d48d61215d1f"
+    , KeyHashObj $ KeyHash "7cad8428ef51c1eb1f916be74e43ad49fd022482484a770d43b003ea"
+    )
+  ,
+    ( ScriptHashObj $ ScriptHash "d5d09d9380cf9dcde1f3c6cd88b08ca9e00a3d550022ca7ee4026342"
+    , KeyHashObj $ KeyHash "ca283340187f1b87e871d903c0178ddfbf4aa896a398787ceba20f98"
+    )
+  ]
+
+unregisteredDRepIds :: [Credential 'DRepRole StandardCrypto]
+unregisteredDRepIds =
+  [KeyHashObj $ KeyHash "0d94e174732ef9aae73f395ab44507bfa983d65023c11a951f0c32e4"]
+
 createStakeCredentials :: Int -> [StakeCredential StandardCrypto]
 createStakeCredentials n =
   fmap (KeyHashObj . KeyHash . mkDummyHash (Proxy @(ADDRHASH StandardCrypto))) [1 .. n]
@@ -290,8 +324,24 @@ consPoolParams poolId rwCred owners =
     , ppPledge = Coin 1000
     , ppCost = Coin 10000
     , ppMargin = minBound
-    , ppRewardAcnt = RewardAcnt Testnet rwCred
+    , ppRewardAccount = RewardAccount Testnet rwCred
     , ppOwners = Set.fromList owners
     , ppRelays = StrictSeq.singleton $ SingleHostAddr SNothing SNothing SNothing
     , ppMetadata = SJust $ PoolMetadata (fromJust $ textToUrl 64 "best.pool") "89237365492387654983275634298756"
     }
+
+resolveStakePoolVoters ::
+  EraCrypto era ~ StandardCrypto =>
+  LedgerState (ShelleyBlock proto era) ->
+  [Voter StandardCrypto]
+resolveStakePoolVoters ledger =
+  [ StakePoolVoter (resolvePool (PoolIndex 0) ledger)
+  , StakePoolVoter (resolvePool (PoolIndex 1) ledger)
+  , StakePoolVoter (resolvePool (PoolIndex 2) ledger)
+  ]
+
+drepVoters :: [Voter StandardCrypto]
+drepVoters = map DRepVoter unregisteredDRepIds
+
+committeeVoters :: [Voter StandardCrypto]
+committeeVoters = map (CommitteeVoter . snd) bootstrapCommitteeCreds

@@ -22,7 +22,7 @@ import qualified Cardano.DbSync.Era.Shelley.Generic as Generic
 import Cardano.DbSync.Era.Universal.Block (insertBlockUniversal)
 import Cardano.DbSync.Era.Universal.Epoch (hasEpochStartEvent, hasNewEpochEvent)
 import Cardano.DbSync.Era.Universal.Insert.Certificate (mkAdaPots)
-import Cardano.DbSync.Era.Universal.Insert.LedgerEvent (insertBlockLedgerEvents)
+import Cardano.DbSync.Era.Universal.Insert.LedgerEvent (insertNewEpochLedgerEvents)
 import Cardano.DbSync.Error
 import Cardano.DbSync.Fix.EpochStake
 import Cardano.DbSync.Ledger.State (applyBlockAndSnapshot, defaultApplyResult)
@@ -129,7 +129,7 @@ insertBlock syncEnv cblk applyRes firstAfterRollback tookSnapshot = do
   let !details = apSlotDetails applyResult
   let !withinTwoMin = isWithinTwoMin details
   let !withinHalfHour = isWithinHalfHour details
-  insertBlockLedgerEvents syncEnv (sdEpochNo details) (apEvents applyResult)
+  insertNewEpochLedgerEvents syncEnv (sdEpochNo details) (apEvents applyResult)
   let isNewEpochEvent = hasNewEpochEvent (apEvents applyResult)
   let isStartEventOrRollback = hasEpochStartEvent (apEvents applyResult) || firstAfterRollback
   let isMember poolId = Set.member poolId (apPoolsRegistered applyResult)
@@ -179,10 +179,11 @@ insertBlock syncEnv cblk applyRes firstAfterRollback tookSnapshot = do
   whenPruneTxOut syncEnv $
     when (unBlockNo blkNo `mod` getPruneInterval syncEnv == 0) $
       do
-        lift $ DB.deleteConsumedTxOut tracer (getSafeBlockNoDiff syncEnv)
+        lift $ DB.deleteConsumedTxOut tracer txOutTableType (getSafeBlockNoDiff syncEnv)
   commitOrIndexes withinTwoMin withinHalfHour
   where
     tracer = getTrace syncEnv
+    txOutTableType = getTxOutTableType syncEnv
     iopts = getInsertOptions syncEnv
 
     updateEpoch details isNewEpochEvent =

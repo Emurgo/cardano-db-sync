@@ -4,9 +4,10 @@ import Cardano.Mock.ChainSync.Server (IOManager ())
 import Cardano.Prelude
 import qualified Test.Cardano.Db.Mock.Unit.Conway.CommandLineArg.ConfigFile as ConfigFile
 import qualified Test.Cardano.Db.Mock.Unit.Conway.CommandLineArg.EpochDisabled as EpochDisabled
-import qualified Test.Cardano.Db.Mock.Unit.Conway.CommandLineArg.ForceIndex as ForceIndex
+import qualified Test.Cardano.Db.Mock.Unit.Conway.Config.JsonbInSchema as Config
 import qualified Test.Cardano.Db.Mock.Unit.Conway.Config.MigrateConsumedPruneTxOut as MigrateConsumedPruneTxOut
 import qualified Test.Cardano.Db.Mock.Unit.Conway.Config.Parse as Config
+import qualified Test.Cardano.Db.Mock.Unit.Conway.Governance as Governance
 import qualified Test.Cardano.Db.Mock.Unit.Conway.InlineAndReference as InlineRef
 import qualified Test.Cardano.Db.Mock.Unit.Conway.Other as Other
 import qualified Test.Cardano.Db.Mock.Unit.Conway.Plutus as Plutus
@@ -15,8 +16,8 @@ import qualified Test.Cardano.Db.Mock.Unit.Conway.Rollback as Rollback
 import qualified Test.Cardano.Db.Mock.Unit.Conway.Simple as Simple
 import qualified Test.Cardano.Db.Mock.Unit.Conway.Stake as Stake
 import qualified Test.Cardano.Db.Mock.Unit.Conway.Tx as Tx
+import Test.Cardano.Db.Mock.Validate (expectFailSilent)
 import Test.Tasty (TestTree (), testGroup)
-import Test.Tasty.ExpectedFailure (expectFail)
 import Test.Tasty.HUnit (Assertion (), testCase)
 import Prelude (String ())
 
@@ -34,9 +35,16 @@ unitTests iom knownMigrations =
         , testCase "default insert config" Config.defaultInsertConfig
         , testCase "insert config" Config.insertConfig
         , testGroup
+            "jsonb-in-schema"
+            [ test "jsonb in schema true" Config.configRemoveJsonbFromSchemaEnabled
+            , test "jsonb in schema false" Config.configRemoveJsonbFromSchemaDisabled
+            , test
+                "remove jsonb from schema and add back"
+                Config.configJsonbInSchemaShouldRemoveThenAdd
+            ]
+        , testGroup
             "tx-out"
-            [ test "consumed_by_tx_id column check" MigrateConsumedPruneTxOut.txConsumedColumnCheck
-            , test "basic prune" MigrateConsumedPruneTxOut.basicPrune
+            [ test "basic prune" MigrateConsumedPruneTxOut.basicPrune
             , test "prune with simple rollback" MigrateConsumedPruneTxOut.pruneWithSimpleRollback
             , test "prune with full tx rollback" MigrateConsumedPruneTxOut.pruneWithFullTxRollback
             , test "pruning should keep some tx" MigrateConsumedPruneTxOut.pruningShouldKeepSomeTx
@@ -44,18 +52,38 @@ unitTests iom knownMigrations =
             , test "no pruning and rollback" MigrateConsumedPruneTxOut.noPruneAndRollBack
             , test "prune same block" MigrateConsumedPruneTxOut.pruneSameBlock
             , test "no pruning same block" MigrateConsumedPruneTxOut.noPruneSameBlock
-            , expectFail $
-                test
-                  "restart with new consumed set to false"
-                  MigrateConsumedPruneTxOut.migrateAndPruneRestart
-            , expectFail $
-                test
-                  "set prune flag, restart missing prune flag"
-                  MigrateConsumedPruneTxOut.pruneRestartMissingFlag
-            , expectFail $
-                test
-                  "set bootstrap flag, restart missing bootstrap flag"
-                  MigrateConsumedPruneTxOut.bootstrapRestartMissingFlag
+            , expectFailSilent
+                "restart with new consumed set to false"
+                $ MigrateConsumedPruneTxOut.migrateAndPruneRestart iom knownMigrations
+            , expectFailSilent
+                "set prune flag, restart missing prune flag"
+                $ MigrateConsumedPruneTxOut.pruneRestartMissingFlag iom knownMigrations
+            , expectFailSilent
+                "set bootstrap flag, restart missing bootstrap flag"
+                $ MigrateConsumedPruneTxOut.bootstrapRestartMissingFlag iom knownMigrations
+            ]
+        , testGroup
+            "tx-out with use_address_table config"
+            [ test "basic prune, with use_address_table config" MigrateConsumedPruneTxOut.basicPruneWithAddress
+            , test "prune with simple rollback, with use_address_table config" MigrateConsumedPruneTxOut.pruneWithSimpleRollbackWithAddress
+            , test "prune with full tx rollback, with use_address_table config" MigrateConsumedPruneTxOut.pruneWithFullTxRollbackWithAddress
+            , test "pruning should keep some tx, with use_address_table config" MigrateConsumedPruneTxOut.pruningShouldKeepSomeTxWithAddress
+            , test "prune and rollback one block, with use_address_table config" MigrateConsumedPruneTxOut.pruneAndRollBackOneBlockWithAddress
+            , test "no pruning and rollback, with use_address_table config" MigrateConsumedPruneTxOut.noPruneAndRollBackWithAddress
+            , test "prune same block, with use_address_table config" MigrateConsumedPruneTxOut.pruneSameBlockWithAddress
+            , test "no pruning same block, with use_address_table config" MigrateConsumedPruneTxOut.noPruneSameBlockWithAddress
+            , expectFailSilent
+                "restart with new consumed set to false, with use_address_table config"
+                $ MigrateConsumedPruneTxOut.migrateAndPruneRestartWithAddress iom knownMigrations
+            , expectFailSilent
+                "set prune flag, restart missing prune flag, with use_address_table config"
+                $ MigrateConsumedPruneTxOut.pruneRestartMissingFlagWithAddress iom knownMigrations
+            , expectFailSilent
+                "set bootstrap flag, restart missing bootstrap flag, with use_address_table config"
+                $ MigrateConsumedPruneTxOut.bootstrapRestartMissingFlagWithAddress iom knownMigrations
+            , expectFailSilent
+                "populate db then reset with use_address_table config config active"
+                $ MigrateConsumedPruneTxOut.populateDbRestartWithAddressConfig iom knownMigrations
             ]
         ]
     , testGroup
@@ -71,20 +99,14 @@ unitTests iom knownMigrations =
         "Command Line Arguments"
         [ testGroup
             "config"
-            [ expectFail $
-                test
-                  "fails if incorrect config file given"
-                  ConfigFile.checkConfigFileArg
+            [ expectFailSilent
+                "fails if incorrect config file given"
+                $ ConfigFile.checkConfigFileArg iom knownMigrations
             ]
         , testGroup
             "disable-epoch"
             [ test "Epoch doesn't update when disabled" EpochDisabled.checkEpochDisabledArg
             , test "Epoch updates when enabled" EpochDisabled.checkEpochEnabled
-            ]
-        , testGroup
-            "force-indexes"
-            [ test "check force-index adds indexes" ForceIndex.checkForceIndexesArg
-            , test "check no force-index doesn't add indexes" ForceIndex.checkNoForceIndexesArg
             ]
         ]
     , testGroup
@@ -109,6 +131,7 @@ unitTests iom knownMigrations =
         [ test "simple tx" Tx.addSimpleTx
         , test "simple tx in Shelley era" Tx.addSimpleTxShelley
         , test "simple tx with ledger disabled" Tx.addSimpleTxNoLedger
+        , test "tx with treasury donation" Tx.addTxTreasuryDonation
         , test "consume utxo same block" Tx.consumeSameBlock
         , test "tx with metadata" Tx.addTxMetadata
         , test "tx with metadata disabled" Tx.addTxMetadataDisabled
@@ -213,6 +236,16 @@ unitTests iom knownMigrations =
         [ test "fork from Babbage to Conway fixed epoch" Other.forkFixedEpoch
         , test "fork from Babbage to Conway and rollback" Other.rollbackFork
         , test "fork with protocol change proposal" Other.forkParam
+        ]
+    , testGroup
+        "Governance"
+        [ test "drep distribution" Governance.drepDistr
+        , test "new committee member" Governance.newCommittee
+        , test "update constitution" Governance.updateConstitution
+        , test "treasury withdrawal" Governance.treasuryWithdrawal
+        , test "parameter change" Governance.parameterChange
+        , test "hard fork" Governance.hardFork
+        , test "info action" Governance.infoAction
         ]
     ]
   where

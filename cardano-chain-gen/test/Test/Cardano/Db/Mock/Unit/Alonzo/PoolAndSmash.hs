@@ -20,6 +20,7 @@ import Cardano.Mock.Forging.Tx.Generic (resolvePool)
 import Cardano.Mock.Forging.Types (PoolIndex (..), StakeIndex (..))
 import Cardano.SMASH.Server.PoolDataLayer (PoolDataLayer (..), dbToServantPoolId)
 import Cardano.SMASH.Server.Types (DBFail (RecordDoesNotExist))
+import Cardano.Slotting.Slot (EpochNo (..))
 import Control.Monad (void)
 import Data.Text (Text)
 import Ouroboros.Consensus.Cardano.Block (StandardAlonzo, StandardCrypto)
@@ -106,7 +107,7 @@ poolDeReg =
             , PoolIndexNew 0
             , Alonzo.consPoolParamsTwoOwners
             )
-          , ([], PoolIndexNew 0, \_ poolId -> ShelleyTxCertPool $ RetirePool poolId 1)
+          , ([], PoolIndexNew 0, \_ poolId -> ShelleyTxCertPool $ RetirePool poolId (EpochNo 1))
           ]
 
     assertBlockNoBackoff dbSync 2
@@ -148,7 +149,7 @@ poolDeRegMany =
             , Alonzo.consPoolParamsTwoOwners
             )
           , -- de register
-            ([], PoolIndexNew 0, mkPoolDereg 4)
+            ([], PoolIndexNew 0, mkPoolDereg (EpochNo 4))
           , -- register
 
             ( [StakeIndexNew 0, StakeIndexNew 1, StakeIndexNew 2]
@@ -178,7 +179,7 @@ poolDeRegMany =
       tx1 <-
         Alonzo.mkDCertPoolTx
           [ -- deregister
-            ([] :: [StakeIndex], PoolIndexNew 0, mkPoolDereg 4)
+            ([] :: [StakeIndex], PoolIndexNew 0, mkPoolDereg (EpochNo 4))
           , -- register
 
             ( [StakeIndexNew 0, StakeIndexNew 1, StakeIndexNew 2]
@@ -186,14 +187,14 @@ poolDeRegMany =
             , Alonzo.consPoolParamsTwoOwners
             )
           , -- deregister
-            ([] :: [StakeIndex], PoolIndexNew 0, mkPoolDereg 1)
+            ([] :: [StakeIndex], PoolIndexNew 0, mkPoolDereg (EpochNo 1))
           ]
           st
       pure [tx0, tx1]
 
     assertBlockNoBackoff dbSync 3
     -- TODO fix PoolOwner and PoolRelay unique key
-    assertPoolCounters dbSync (addPoolCounters (1, 1, 5, 10, 3, 5) initCounter)
+    assertPoolCounters dbSync (addPoolCounters (1, 5, 5, 10, 3, 5) initCounter)
 
     st <- getAlonzoLedgerState interpreter
     -- Not retired yet, because epoch has not changed
@@ -204,7 +205,7 @@ poolDeRegMany =
 
     assertBlockNoBackoff dbSync (fromIntegral $ length a + 3)
     -- these counters are the same
-    assertPoolCounters dbSync (addPoolCounters (1, 1, 5, 10, 3, 5) initCounter)
+    assertPoolCounters dbSync (addPoolCounters (1, 5, 5, 10, 3, 5) initCounter)
 
     -- from all these certificates only the latest matters. So it will retire
     -- on epoch 0
@@ -255,7 +256,7 @@ poolDelist =
     void $
       withAlonzoFindLeaderAndSubmitTx interpreter mockServer $
         Alonzo.mkDCertPoolTx
-          [([], PoolIndexNew 0, \_ poolHash -> ShelleyTxCertPool $ RetirePool poolHash 1)]
+          [([], PoolIndexNew 0, \_ poolHash -> ShelleyTxCertPool $ RetirePool poolHash (EpochNo 1))]
 
     void $ forgeNextFindLeaderAndSubmit interpreter mockServer []
     assertBlockNoBackoff dbSync 5

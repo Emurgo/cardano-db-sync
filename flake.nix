@@ -44,35 +44,27 @@
               builtins.attrValues inputs.iohkNix.overlays ++
               [ inputs.haskellNix.overlay
 
-                (final: prev: with final; {
-                  # Required in order to build postgresql for musl
-                  postgresql = (final.postgresql_11
-                    .overrideAttrs (_: lib.optionalAttrs (stdenv.hostPlatform.isMusl) {
-                      dontDisableStatic = true;
-                      NIX_LDFLAGS = "--push-state --as-needed -lstdc++ --pop-state";
-                      # without this collate.icu.utf8, and foreign_data will fail.
-                      LC_CTYPE = "C";
-                    }))
-                    .override {
-                      enableSystemd = stdenv.hostPlatform.isLinux && !stdenv.hostPlatform.isMusl;
-                      gssSupport = stdenv.hostPlatform.isLinux && !stdenv.hostPlatform.isMusl;
-                    };
-                })
-
                 (final: prev: {
                   inherit (project.hsPkgs.cardano-node.components.exes) cardano-node;
                   inherit (project.hsPkgs.cardano-cli.components.exes) cardano-cli;
                 })
 
-                (final: prev: {
-                  # The cardano-db-sync NixOS module (nix/nixos/cardano-db-sync-service.nix)
-                  # expects these to be here
-                  inherit (project.exes)
-                    cardano-db-sync
-                    cardano-db-tool
-                    cardano-smash-server;
-                  schema = ./schema;
-                })
+                (final: prev:
+                  let
+                    profiled = project.profiled.exes;
+                  in {
+                    # The cardano-db-sync NixOS module (nix/nixos/cardano-db-sync-service.nix)
+                    # expects these to be here
+                    inherit (project.exes)
+                      cardano-db-sync
+                      cardano-db-tool
+                      cardano-smash-server;
+
+                    cardano-db-sync-profiled = profiled.cardano-db-sync;
+                    cardano-smash-server-profiled = profiled.cardano-smash-server;
+
+                    schema = ./schema;
+                  })
 
                 (final: prev: {
                   # HLint 3.2.x requires GHC >= 8.10 && < 9.0
@@ -89,6 +81,16 @@
                   weeder = final.haskell-nix.tool "ghc8107" "weeder" {
                     version = "2.2.0";
                   };
+                })
+
+                (final: prev: {
+                  postgresql = prev.postgresql.overrideAttrs (_:
+                    final.lib.optionalAttrs (final.stdenv.hostPlatform.isMusl) {
+                      NIX_LDFLAGS = "--push-state --as-needed -lstdc++ --pop-state";
+                      LC_CTYPE = "C";
+
+                      doCheck = false;
+                    });
                 })
               ];
           };
@@ -142,22 +144,35 @@
             compiler-nix-name =
               if system == "x86_64-linux"
                 then lib.mkDefault "ghc810"
-                else lib.mkDefault "ghc963";
+                else lib.mkDefault "ghc96";
             flake.variants =
               let
-                compilers = lib.optionals (system == "x86_64-linux") ["ghc963"];
+                compilers =
+                  if (system == "x86_64-linux") then
+                    ["ghc96" "ghc98" "ghc910"]
+                  else
+                    ["ghc98"];
               in
                 lib.genAttrs compilers (c: { compiler-nix-name = c; });
+
+            crossPlatforms = p:
+              lib.optional (system == "x86_64-linux") p.musl64 ++
+              lib.optional
+                (system == "x86_64-linux" && config.compiler-nix-name == "ghc966")
+                p.aarch64-multiplatform-musl;
 
             inputMap = {
               "https://chap.intersectmbo.org/" = inputs.CHaP;
             };
 
             shell.tools = {
-              cabal = "3.10.1.0";
-              ghcid = "0.8.8";
+              cabal = "latest";
               haskell-language-server = {
-                src = nixpkgs.haskell-nix.sources."hls-1.10";
+                src =
+                  if config.compiler-nix-name == "ghc8107" then
+                    nixpkgs.haskell-nix.sources."hls-1.10"
+                  else
+                    nixpkgs.haskell-nix.sources."hls-2.9";
               };
             };
             # Now we use pkgsBuildBuild, to make sure that even in the cross
@@ -165,13 +180,21 @@
             # for the target.
             shell.buildInputs = with nixpkgs.pkgsBuildBuild; [
               gitAndTools.git
-              fourmolu
               hlint
             ] ++ lib.optionals (config.compiler-nix-name == "ghc8107") [
               # Weeder requires the GHC version to match HIE files
               weeder
+            ] ++ lib.optionals (system != "aarch64-darwin") [
+              # TODO: Fourmolu 0.10 is currently failing to build with aarch64-darwin
+              #
+              # Linking dist/build/fourmolu/fourmolu ...
+              # ld: line 269:  2352 Segmentation fault ...
+              # clang-11: error: linker command failed with exit code 139 (use -v to see invocation)
+              # `cc' failed in phase `Linker'. (Exit code: 139)
+              fourmolu
             ];
             shell.withHoogle = true;
+            shell.crossPlatforms = _: [];
 
             modules = [
               ({ lib, pkgs, ... }: {
@@ -179,9 +202,6 @@
                 packages.katip.doExactConfig = true;
                 # Split data to reduce closure size
                 packages.ekg.components.library.enableSeparateDataOutput = true;
-                # Systemd can't be statically linked
-                packages.cardano-node.flags.systemd =
-                  !pkgs.stdenv.hostPlatform.isMusl;
               })
 
               ({
@@ -191,7 +211,7 @@
                 packages.cardano-db.package.extraSrcFiles =
                   ["../config/pgpass-testnet"];
                 packages.cardano-db.components.tests.schema-rollback.extraSrcFiles =
-                  [ "src/Cardano/Db/Schema.hs" "src/Cardano/Db/Delete.hs" ];
+                  [ "src/Cardano/Db/Schema/BaseSchema.hs" "src/Cardano/Db/Operations/Delete.hs" ];
                 packages.cardano-db.components.tests.test-db.extraSrcFiles =
                   [ "../config/pgpass-mainnet" ];
                 packages.cardano-chain-gen.package.extraSrcFiles =
@@ -209,7 +229,13 @@
                   packages.cardano-ledger-conway.doHaddock = false;
                   packages.cardano-ledger-shelley.doHaddock = false;
                   packages.cardano-protocol-tpraos.doHaddock = false;
+                  packages.fs-api.doHaddock = false;
                   packages.ouroboros-network-framework.doHaddock = false;
+                  packages.ouroboros-consensus-cardano.doHaddock = false;
+                  packages.ouroboros-consensus.doHaddock = false;
+                  packages.cardano-ledger-core.doHaddock = false;
+                  packages.plutus-ledger-api.doHaddock = false;
+                  packages.wai-extra.doHaddock = false;
                 })
 
               ({ lib, pkgs, config, ... }:
@@ -224,7 +250,7 @@
                 # Database tests
                 let
                   postgresTest = {
-                    build-tools = [ pkgs.pkgsBuildHost.postgresql_12 ];
+                    build-tools = [ pkgs.pkgsBuildHost.postgresql_14 ];
                     inherit preCheck;
                     inherit postCheck;
                   };
@@ -233,18 +259,113 @@
                   packages.cardano-chain-gen.components.tests.cardano-chain-gen =
                     postgresTest;
                 })
+
+              (pkgs.lib.mkIf pkgs.hostPlatform.isMusl
+                (let
+                  ghcOptions = [
+                    # Postgresql static is pretty broken in nixpkgs. We can't rely on the
+                    # pkg-config, so we have to add the correct libraries ourselves
+                    "-L${pkgs.postgresql}/lib"
+                    "-optl-Wl,-lpgport"
+                    "-optl-Wl,-lpgcommon"
+
+                    # Since we aren't using the postgresql pkg-config, it won't
+                    # automatically include OpenSSL
+                    "-L${pkgs.openssl.out}/lib"
+
+                    # The ordering of -lssl and -lcrypto below is important. Otherwise,
+                    # we'll get:
+                    #
+                    #     (.text+0x2c3d): undefined reference to `COMP_get_type'
+                    #     (.text+0x2de6): undefined reference to `COMP_get_name'
+                    #     (.text+0x4af4): undefined reference to `COMP_CTX_free'
+                    #     (.text+0x4bdd): undefined reference to `COMP_CTX_get_method'
+                    "-optl-Wl,-lssl"
+                    "-optl-Wl,-lcrypto"
+                  ];
+                in {
+                  packages.cardano-chain-gen.ghcOptions = ghcOptions;
+                  packages.cardano-db-sync.ghcOptions = ghcOptions;
+                  packages.cardano-db.ghcOptions = ghcOptions;
+                  packages.cardano-db-tool.ghcOptions = ghcOptions;
+                  packages.cardano-smash-server.ghcOptions = ghcOptions;
+                }))
+
+              ({
+                packages.double-conversion.ghcOptions = [
+                  # stop putting U __gxx_personality_v0 into the library!
+                  "-optcxx-fno-rtti"
+                  "-optcxx-fno-exceptions"
+                  # stop putting U __cxa_guard_release into the library!
+                  "-optcxx-std=gnu++98"
+                  "-optcxx-fno-threadsafe-statics"
+                ];
+              })
+
+              (lib.mkIf pkgs.haskell-nix.haskellLib.isCrossHost {
+                packages.text-icu.patches = [
+                  # Fix the following compilation error when cross-compiling:
+                  #
+                  # Char.hsc: In function ‘_hsc2hs_test45’:
+                  # Char.hsc:1227:20: error: storage size of ‘test_array’ isn’t constant
+                  # Char.hsc:1227:20: warning: unused variable ‘test_array’ [8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wunused-variable-Wunused-variable8;;]
+                  # compilation failed
+                  #
+                  # U_NO_NUMERIC_VALUE is defined to be `((double)-123456789.)` which gcc can't
+                  # figure out at compile time.
+                  #
+                  # More context:
+                  #
+                  # https://github.com/haskell/text-icu/issues/7
+                  # https://gitlab.haskell.org/ghc/ghc/-/issues/7983
+                  # https://gitlab.haskell.org/ghc/ghc/-/issues/12849
+                  (builtins.toFile "text-icu.patch" ''
+                    diff --git c/Data/Text/ICU/Char.hsc i/Data/Text/ICU/Char.hsc
+                    index 6ea2b39..a0bf995 100644
+                    --- c/Data/Text/ICU/Char.hsc
+                    +++ i/Data/Text/ICU/Char.hsc
+                    @@ -1223,7 +1223,7 @@ digitToInt c
+                     -- fractions, negative, or too large to fit in a fixed-width integral type.
+                     numericValue :: Char -> Maybe Double
+                     numericValue c
+                    -    | v == (#const U_NO_NUMERIC_VALUE) = Nothing
+                    +    | v == -123456789 = Nothing
+                         | otherwise                        = Just v
+                         where v = u_getNumericValue . fromIntegral . ord $ c
+                  '')
+                ];
+              })
+
+              ({ lib, pkgs, config, ... }: lib.mkIf pkgs.hostPlatform.isMacOS {
+                # PostgreSQL tests fail in Hydra on MacOS with:
+                #
+                #     FATAL:  could not create shared memory segment: No space left on device
+                #     DETAIL:  Failed system call was shmget(key=639754676, size=56, 03600).
+                #     HINT:  This error does *not* mean that you have run out of disk space.
+                #       It occurs either if all available shared memory IDs have been taken,
+                #       in which case you need to raise the SHMMNI parameter in your kernel,
+                #       or because the system's overall limit for shared memory has been reached.
+                #
+                # So disable them for now
+                packages.cardano-chain-gen.components.tests.cardano-chain-gen.doCheck = false;
+                packages.cardano-db.components.tests.test-db.doCheck = false;
+              })
             ];
           })).appendOverlays [
             # Collect local package `exe`s
             nixpkgs.haskell-nix.haskellLib.projectOverlays.projectComponents
 
-            # Add git revision to `exe`s
             (final: prev: {
-              hsPkgs = final.pkgs.setGitRevForPaths (self.rev or "dirty") [
-                "cardano-db-sync.components.exes.cardano-db-sync"
-                "cardano-smash-server.components.exes.cardano-smash-server"
-                "cardano-db-tool.components.exes.cardano-db-tool"
-              ] prev.hsPkgs;
+              profiled = final.appendModule {
+                modules = [{
+                  enableLibraryProfiling = true;
+                  enableProfiling = true;
+                  packages.cardano-db-sync.configureFlags =
+                    ["--ghc-option=-fprof-auto"];
+                  packages.cardano-smash-server.configureFlags =
+                    ["--ghc-option=-fprof-auto"];
+                }];
+              };
             })
           ];
 
@@ -258,16 +379,15 @@
                 shellcheck = callPackage shellCheck { inherit src; };
               };
 
-          flake = project.flake (
-            nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
-              crossPlatforms = p: [p.musl64];
-            }
-          );
+          flake = project.flake {};
         in with nixpkgs; lib.recursiveUpdate flake (
           let
             mkDist = platform: project:
               let
-                exes = lib.collect lib.isDerivation project.exes;
+                exes = with lib; pipe project.exes [
+                  (collect isDerivation)
+                  (map setGitRev)
+                ];
                 name = "cardano-db-sync-${version}-${platform}";
                 version = project.exes.cardano-db-sync.identifier.version;
                 env = {
@@ -314,19 +434,33 @@
             };
             inherit (docker) cardano-db-sync-docker cardano-smash-server-docker;
 
+            profiled = {
+              inherit (project.profiled.exes) cardano-db-sync cardano-smash-server;
+            };
+
             # TODO: macOS builders are resource-constrained and cannot run the detabase
             # integration tests. Add these back when we get beefier builders.
             nonRequiredMacOSPaths = [
               "checks.cardano-chain-gen:test:cardano-chain-gen"
               "checks.cardano-db:test:test-db"
-              "ghc963.checks.cardano-chain-gen:test:cardano-chain-gen"
-              "ghc963.checks.cardano-db:test:test-db"
+              "ghc96.checks.cardano-chain-gen:test:cardano-chain-gen"
+              "ghc96.checks.cardano-db:test:test-db"
+              "ghc98.checks.cardano-chain-gen:test:cardano-chain-gen"
+              "ghc98.checks.cardano-db:test:test-db"
             ];
 
             nonRequiredPaths =
               if hostPlatform.isMacOS then
                 nonRequiredMacOSPaths
               else [];
+
+            exeSetGitRev = drvKey: drv:
+              if nixpkgs.lib.hasInfix ":exe:" drvKey then
+                setGitRev drv
+              else
+                drv;
+
+            setGitRev = nixpkgs.setGitRev (self.rev or "dirty");
 
           in rec {
             checks = staticChecks;
@@ -339,11 +473,13 @@
                 cardano-db-sync-linux
                 cardano-db-sync-docker
                 cardano-smash-server-docker;
+
+              # No need to run static checks on all architectures
+              checks = staticChecks;
             } // lib.optionalAttrs (system == "x86_64-darwin") {
               inherit cardano-db-sync-macos;
             } // {
-              inherit cardano-smash-server-no-basic-auth;
-              checks = staticChecks;
+              inherit cardano-smash-server-no-basic-auth profiled;
             };
 
             legacyPackages = pkgs;
@@ -359,8 +495,9 @@
             } // lib.optionalAttrs (system == "x86_64-darwin") {
               inherit cardano-db-sync-macos;
             } // {
-              inherit cardano-smash-server-no-basic-auth;
-            };
+              inherit cardano-smash-server-no-basic-auth profiled;
+            # Run setGitRev on all packages that have ":exe:" in their key
+            } // builtins.mapAttrs exeSetGitRev flake.packages;
           })) // {
             nixosModules = {
               cardano-db-sync = { pkgs, lib, ... }: {
@@ -369,7 +506,11 @@
                   let
                     pkgs' = self.legacyPackages.${pkgs.system};
                   in {
-                    inherit (pkgs') cardanoLib schema cardano-db-sync;
+                    inherit (pkgs')
+                      cardanoLib
+                      schema
+                      cardano-db-sync
+                      cardano-db-sync-profiled;
 
                     # cardano-db-tool
                     cardanoDbSyncHaskellPackages.cardano-db-tool.components.exes.cardano-db-tool =
